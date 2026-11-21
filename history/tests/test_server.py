@@ -94,6 +94,19 @@ class UploadWithoutVinTest(_ServerCase):
         spawn.assert_not_called()
 
 
+class HealthzTest(_ServerCase):
+    token = "test-token"
+
+    async def test_healthz_needs_no_credentials_and_reveals_nothing(self):
+        response = await self.client.get("/healthz")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(await response.json(), {"ok": True})
+
+    async def test_status_still_requires_the_token(self):
+        response = await self.client.get("/status")
+        self.assertEqual(response.status, 401)
+
+
 class SeedFromEnvTest(unittest.TestCase):
     def test_env_fills_only_missing_values_and_keeps_the_stored_config(self):
         stored = {"vin": "TESTVIN0000000002"}

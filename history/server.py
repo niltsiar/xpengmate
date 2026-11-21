@@ -238,6 +238,9 @@ class HistoryService:
 
     # -- handlers ---------------------------------------------
 
+    async def handle_healthz(self, request: "web.Request") -> "web.Response":
+        return web.json_response({"ok": True})
+
     async def handle_status(self, request: "web.Request") -> "web.Response":
         vin = str(self.settings.get("vin") or "")
         last_run = read_json(LAST_RUN_PATH)
@@ -627,6 +630,7 @@ def _tail(path: str, limit: int) -> str:
 
 def build_app(service: HistoryService) -> "web.Application":
     app = web.Application(client_max_size=512 * 1024 * 1024)
+    app.router.add_get("/healthz", service.handle_healthz)
     app.router.add_get("/status", service.handle_status)
     app.router.add_get("/exports", service.handle_exports_status)
     app.router.add_post("/exports", service.handle_export_upload)
@@ -636,7 +640,7 @@ def build_app(service: HistoryService) -> "web.Application":
 
     @web.middleware
     async def auth(request: web.Request, handler: Any) -> Any:
-        if TOKEN:
+        if TOKEN and request.path != "/healthz":
             header = request.headers.get("Authorization", "")
             scheme, _, value = header.partition(" ")
             if not (scheme.lower() == "bearer" and value.strip() == TOKEN):
