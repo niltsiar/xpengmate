@@ -30,6 +30,7 @@ from typing import Any
 
 import psycopg
 
+import repair_drive_gaps
 from close_orphan_charges import close_orphans
 
 try:
@@ -50,6 +51,7 @@ EXPORT_UPLOAD_DIR = os.environ.get("HISTORY_EXPORT_DIR", "/data/exports/uploaded
 DATABASE_URL = os.environ.get("XPENGMATE_DATABASE_URL", "")
 TOKEN = os.environ.get("XPENGMATE_HISTORY_TOKEN", "")
 ORPHAN_CLOSE_INTERVAL = float(os.environ.get("HISTORY_ORPHAN_CLOSE_INTERVAL_SECONDS", "600"))
+DRIVE_REPAIR_INTERVAL = float(os.environ.get("HISTORY_DRIVE_REPAIR_INTERVAL_SECONDS", "600"))
 
 _TRUE = {"1", "true", "yes", "on"}
 
@@ -215,6 +217,7 @@ class HistoryService:
         self._task: asyncio.Task[Any] | None = None
         self._export_task: asyncio.Task[Any] | None = None
         self._orphan_task: asyncio.Task[Any] | None = None
+        self._repair_task: asyncio.Task[Any] | None = None
         self._config = read_json(CONFIG_PATH)
         self._session: "aiohttp.ClientSession | None" = None
 
@@ -233,6 +236,12 @@ class HistoryService:
         self._session = aiohttp.ClientSession()
         if DATABASE_URL and ORPHAN_CLOSE_INTERVAL > 0:
             self._orphan_task = asyncio.create_task(self._close_orphans_forever())
+        if DATABASE_URL and DRIVE_REPAIR_INTERVAL > 0:
+            repair_settings = repair_drive_gaps.settings_from_env(os.environ)
+            if repair_settings is not None:
+                self._repair_task = asyncio.create_task(
+                    self._repair_drive_gaps_forever(repair_settings)
+                )
 
     async def stop(self) -> None:
         if self._task is not None:
@@ -241,6 +250,8 @@ class HistoryService:
             self._export_task.cancel()
         if self._orphan_task is not None:
             self._orphan_task.cancel()
+        if self._repair_task is not None:
+            self._repair_task.cancel()
         if self._session is not None:
             await self._session.close()
 
@@ -256,6 +267,19 @@ class HistoryService:
         with psycopg.connect(DATABASE_URL, autocommit=True) as connection:
             with connection.cursor() as cursor:
                 close_orphans(cursor)
+
+    async def _repair_drive_gaps_forever(self, repair_settings: dict[str, str]) -> None:
+        while True:
+            try:
+                await asyncio.to_thread(
+                    repair_drive_gaps.run,
+                    DATABASE_URL,
+                    repair_settings,
+                    str(self.settings.get("vin") or ""),
+                )
+            except Exception:  # noqa: BLE001 - the database or Home Assistant may be down
+                _LOGGER.warning("repairing drive gaps failed", exc_info=True)
+            await asyncio.sleep(DRIVE_REPAIR_INTERVAL)
 
     # -- handlers ---------------------------------------------
 
