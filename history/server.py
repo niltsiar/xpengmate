@@ -50,6 +50,13 @@ TOKEN = os.environ.get("XPENGMATE_HISTORY_TOKEN", "")
 
 _TRUE = {"1", "true", "yes", "on"}
 
+# Settings that fall back to the environment when the stored source has no value.
+_ENV_SETTINGS = {
+    "vin": "XPENG_VIN",
+    "usable_battery_kwh": "XPENG_USABLE_BATTERY_KWH",
+    "car_name": "XPENG_CAR_NAME",
+}
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -72,6 +79,16 @@ def write_json(path: str, payload: dict[str, Any]) -> None:
         json.dump(payload, handle, indent=2, sort_keys=True)
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
+
+
+def seed_from_env(config: dict[str, Any]) -> dict[str, Any]:
+    """Copy of the config with unset vin, battery size and car name taken from the environment."""
+    seeded = dict(config)
+    for key, name in _ENV_SETTINGS.items():
+        value = os.environ.get(name, "").strip()
+        if not seeded.get(key) and value:
+            seeded[key] = value
+    return seeded
 
 
 def config_public(config: dict[str, Any]) -> dict[str, Any]:
@@ -198,6 +215,11 @@ class HistoryService:
         self._session: "aiohttp.ClientSession | None" = None
 
     @property
+    def settings(self) -> dict[str, Any]:
+        """The stored config with environment defaults for what the user never set."""
+        return seed_from_env(self._config)
+
+    @property
     def configured(self) -> bool:
         return config_public(self._config)["configured"]
 
@@ -217,7 +239,7 @@ class HistoryService:
     # -- handlers ---------------------------------------------
 
     async def handle_status(self, request: "web.Request") -> "web.Response":
-        vin = str(self._config.get("vin") or "")
+        vin = str(self.settings.get("vin") or "")
         last_run = read_json(LAST_RUN_PATH)
         payload: dict[str, Any] = {
             "ok": True,
@@ -337,7 +359,7 @@ class HistoryService:
         ]
 
     async def handle_export_upload(self, request: "web.Request") -> "web.Response":
-        if not self._config.get("vin"):
+        if not self.settings.get("vin"):
             return web.json_response(
                 {"error": "set the VIN in the history source first"}, status=409
             )
@@ -375,21 +397,22 @@ class HistoryService:
         if not saved:
             return web.json_response({"error": "no files in the upload"}, status=400)
 
-        self._export_task = asyncio.create_task(self._run_export_import(saved))
+        self._export_task = asyncio.create_task(self._run_uploaded_export_import(saved))
         return web.json_response(
             {"ok": True, "started": True, "files": [os.path.basename(p) for p in saved]}
         )
 
-    async def _run_export_import(self, paths: list[str]) -> None:
+    async def _run_uploaded_export_import(self, paths: list[str]) -> None:
         started = _now()
         write_json(EXPORT_LAST_RUN, {"started_at": started, "ok": None, "files": paths})
+        settings = self.settings
         environment = dict(os.environ)
         environment.update(
             {
                 "XPENGMATE_DATABASE_URL": DATABASE_URL,
-                "XPENG_VIN": str(self._config.get("vin") or ""),
+                "XPENG_VIN": str(settings.get("vin") or ""),
                 "XPENG_USABLE_BATTERY_KWH": str(
-                    self._config.get("usable_battery_kwh") or "87.5"
+                    settings.get("usable_battery_kwh") or "87.5"
                 ),
                 "PYTHONUNBUFFERED": "1",
             }
@@ -504,15 +527,16 @@ class HistoryService:
 
     async def _run_import(self) -> None:
         mode = self._config.get("mode") or "supabase"
+        settings = self.settings
         environment = dict(os.environ)
         environment.update(
             {
                 "XPENGMATE_DATABASE_URL": DATABASE_URL,
-                "XPENG_VIN": str(self._config.get("vin") or ""),
+                "XPENG_VIN": str(settings.get("vin") or ""),
                 "XPENG_USABLE_BATTERY_KWH": str(
-                    self._config.get("usable_battery_kwh") or "87.5"
+                    settings.get("usable_battery_kwh") or "87.5"
                 ),
-                "XPENG_CAR_NAME": str(self._config.get("car_name") or "XPeng"),
+                "XPENG_CAR_NAME": str(settings.get("car_name") or "XPeng"),
                 "XPENG_EXPORT_ZIP": str(self._config.get("export_zip") or ""),
                 "PYTHONUNBUFFERED": "1",
             }
@@ -601,13 +625,7 @@ def _tail(path: str, limit: int) -> str:
     return data[-limit:]
 
 
-async def async_main() -> int:
-    logging.basicConfig(
-        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-    )
-    service = HistoryService()
-    await service.start()
+def build_app(service: HistoryService) -> "web.Application":
     app = web.Application(client_max_size=512 * 1024 * 1024)
     app.router.add_get("/status", service.handle_status)
     app.router.add_get("/exports", service.handle_exports_status)
@@ -626,6 +644,17 @@ async def async_main() -> int:
         return await handler(request)
 
     app.middlewares.append(auth)
+    return app
+
+
+async def async_main() -> int:
+    logging.basicConfig(
+        level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    )
+    service = HistoryService()
+    await service.start()
+    app = build_app(service)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     port = int(os.environ.get("HISTORY_PORT", "8100"))
