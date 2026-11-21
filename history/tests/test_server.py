@@ -76,6 +76,14 @@ class UploadSeededFromEnvTest(_ServerCase):
         self.assertEqual(environment["XPENG_USABLE_BATTERY_KWH"], "80.0")
 
 
+class ConfigShowsEnvDefaultsTest(_ServerCase):
+    env = {"XPENG_VIN": "TESTVIN0000000001"}
+
+    async def test_get_config_returns_the_vin_that_only_the_environment_sets(self):
+        response = await self.client.get("/config")
+        self.assertEqual((await response.json())["vin"], "TESTVIN0000000001")
+
+
 class UploadStoredValueWinsTest(_ServerCase):
     stored_config = {"vin": "TESTVIN0000000002", "usable_battery_kwh": 70}
     env = {"XPENG_VIN": "TESTVIN0000000001", "XPENG_USABLE_BATTERY_KWH": "80.0"}

@@ -56,9 +56,17 @@ class CloseOrphansTest(unittest.TestCase):
             """
             CREATE TABLE charging_processes (
                 id INTEGER PRIMARY KEY, car_id INTEGER, start_date TIMESTAMP,
-                end_date TIMESTAMP, duration_min INTEGER, charge_energy_added REAL);
+                end_date TIMESTAMP, duration_min INTEGER, charge_energy_added REAL,
+                charge_energy_used REAL, outside_temp_avg REAL,
+                start_ideal_range_km REAL, end_ideal_range_km REAL,
+                start_rated_range_km REAL, end_rated_range_km REAL,
+                start_battery_level INTEGER, end_battery_level INTEGER);
             CREATE TABLE drives (id INTEGER PRIMARY KEY, car_id INTEGER, start_date TIMESTAMP);
-            CREATE TABLE charges (id INTEGER PRIMARY KEY, charging_process_id INTEGER, date TIMESTAMP);
+            CREATE TABLE charges (
+                id INTEGER PRIMARY KEY, charging_process_id INTEGER, date TIMESTAMP,
+                ideal_battery_range_km REAL, rated_battery_range_km REAL, battery_level INTEGER,
+                outside_temp REAL, charge_energy_added REAL, charger_power INTEGER,
+                charger_phases INTEGER, charger_actual_current INTEGER, charger_voltage INTEGER);
             CREATE TABLE positions (id INTEGER PRIMARY KEY, car_id INTEGER, date TIMESTAMP);
             """
         )
@@ -66,9 +74,21 @@ class CloseOrphansTest(unittest.TestCase):
 
     def process(self, pid, car, start, end=None, energy=7.5):
         self.db.execute(
-            "INSERT INTO charging_processes VALUES (?, ?, ?, ?, NULL, ?)",
+            "INSERT INTO charging_processes (id, car_id, start_date, end_date, charge_energy_added)"
+            " VALUES (?, ?, ?, ?, ?)",
             (pid, car, start, end, energy),
         )
+
+    def sample(self, pid, moment, **values):
+        columns = {"charging_process_id": pid, "date": moment, **values}
+        self.db.execute(
+            f"INSERT INTO charges ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
+            tuple(columns.values()),
+        )
+
+    def filled(self, pid):
+        cursor = self.db.execute("SELECT * FROM charging_processes WHERE id = ?", (pid,))
+        return dict(zip([c[0] for c in cursor.description], cursor.fetchone()))
 
     def row(self, pid):
         return self.db.execute(
@@ -79,11 +99,11 @@ class CloseOrphansTest(unittest.TestCase):
     def test_process_with_a_later_charge_is_closed_at_its_last_sample(self):
         self.process(1, 1, at(2, 44))
         self.process(2, 1, at(9, 37))
-        self.db.execute("INSERT INTO charges VALUES (1, 1, ?)", (at(4, 10),))
-        self.db.execute("INSERT INTO charges VALUES (2, 1, ?)", (at(5, 14),))
+        self.sample(1, at(4, 10), charge_energy_added=1.0)
+        self.sample(1, at(5, 14), charge_energy_added=8.5)
         closed = closer.close_orphans(self.cursor)
         self.assertEqual([c["id"] for c in closed], [1])
-        self.assertEqual(self.row(1), (at(5, 14), 150, 7.5))
+        self.assertEqual(self.row(1), (at(5, 14), 64, 7.5))
         self.assertEqual(self.row(2)[0], None)
 
     def test_process_with_a_later_drive_is_closed(self):
@@ -92,9 +112,67 @@ class CloseOrphansTest(unittest.TestCase):
         closer.close_orphans(self.cursor)
         self.assertEqual(self.row(1)[:2], (at(8), 360))
 
+    def test_samples_fill_energy_soc_and_ranges(self):
+        self.process(1, 1, at(2), energy=None)
+        self.process(2, 1, at(9))
+        self.sample(1, at(3, 0), ideal_battery_range_km=100.0, rated_battery_range_km=90.0,
+                    battery_level=20, outside_temp=10.0, charge_energy_added=0.0,
+                    charger_power=10)
+        self.sample(1, at(4, 0), ideal_battery_range_km=150.0, rated_battery_range_km=135.0,
+                    battery_level=40, outside_temp=None, charge_energy_added=9.0,
+                    charger_power=10)
+        self.sample(1, at(5, 0), ideal_battery_range_km=200.0, rated_battery_range_km=180.0,
+                    battery_level=60, outside_temp=14.0, charge_energy_added=18.0,
+                    charger_power=-5)
+        closer.close_orphans(self.cursor)
+        row = self.filled(1)
+        self.assertEqual((row["start_date"], row["end_date"], row["duration_min"]),
+                         (at(3), at(5), 120))
+        self.assertEqual((row["start_ideal_range_km"], row["end_ideal_range_km"]), (100.0, 200.0))
+        self.assertEqual((row["start_rated_range_km"], row["end_rated_range_km"]), (90.0, 180.0))
+        self.assertEqual((row["start_battery_level"], row["end_battery_level"]), (20, 60))
+        self.assertEqual(row["outside_temp_avg"], 12.0)
+        self.assertEqual(row["charge_energy_added"], 18.0)
+        # 10 kW for 1 h; the negative-power term is dropped.
+        self.assertEqual(row["charge_energy_used"], 10.0)
+
+    def test_energy_used_of_a_single_phase_charge_comes_from_voltage_and_current(self):
+        self.process(1, 1, at(2), energy=None)
+        self.process(2, 1, at(9))
+        for moment in (at(3), at(4), at(5)):
+            self.sample(1, moment, charger_phases=1, charger_actual_current=16,
+                        charger_voltage=230, charger_power=99)
+        closer.close_orphans(self.cursor)
+        self.assertAlmostEqual(self.filled(1)["charge_energy_used"], 2 * 16 * 230 / 1000)
+
+    def test_energy_counter_reset_to_zero_at_the_end_uses_the_max(self):
+        self.process(1, 1, at(2), energy=None)
+        self.process(2, 1, at(9))
+        for moment, kwh in ((at(3), 2.0), (at(4), 12.0), (at(5), 0.0)):
+            self.sample(1, moment, charge_energy_added=kwh)
+        closer.close_orphans(self.cursor)
+        self.assertEqual(self.filled(1)["charge_energy_added"], 10.0)
+
+    def test_negative_energy_added_is_stored_as_null(self):
+        self.process(1, 1, at(2))
+        self.process(2, 1, at(9))
+        self.sample(1, at(3), charge_energy_added=5.0)
+        self.sample(1, at(4), charge_energy_added=3.0)
+        closer.close_orphans(self.cursor)
+        self.assertIsNone(self.filled(1)["charge_energy_added"])
+
+    def test_process_without_samples_keeps_its_energy_fields(self):
+        self.process(1, 1, at(2))
+        self.process(2, 1, at(9))
+        closer.close_orphans(self.cursor)
+        row = self.filled(1)
+        self.assertEqual((row["start_date"], row["end_date"]), (at(2), at(9)))
+        self.assertEqual(row["charge_energy_added"], 7.5)
+        self.assertIsNone(row["charge_energy_used"])
+
     def test_process_without_a_successor_is_left_open(self):
         self.process(1, 1, at(2))
-        self.db.execute("INSERT INTO charges VALUES (1, 1, ?)", (at(3),))
+        self.sample(1, at(3))
         self.db.execute("INSERT INTO drives VALUES (1, 1, ?)", (at(1),))
         self.assertEqual(closer.close_orphans(self.cursor), [])
         self.assertEqual(self.row(1)[:2], (None, None))

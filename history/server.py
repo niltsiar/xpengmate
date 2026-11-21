@@ -268,7 +268,7 @@ class HistoryService:
         payload: dict[str, Any] = {
             "ok": True,
             "configured": self.configured,
-            "config": config_public(self._config),
+            "config": config_public(self.settings),
             "running": self._task is not None and not self._task.done(),
             "last_run": last_run,
         }
@@ -287,7 +287,7 @@ class HistoryService:
         return web.json_response(payload)
 
     async def handle_get_config(self, request: "web.Request") -> "web.Response":
-        return web.json_response(config_public(self._config))
+        return web.json_response(config_public(self.settings))
 
     async def handle_put_config(self, request: "web.Request") -> "web.Response":
         try:
@@ -321,7 +321,7 @@ class HistoryService:
             self._config[key] = value
         write_json(CONFIG_PATH, self._config)
         _LOGGER.info("history configuration updated: %s", sorted(update))
-        return web.json_response({"ok": True, "config": config_public(self._config)})
+        return web.json_response({"ok": True, "config": config_public(self.settings)})
 
     async def handle_sync(self, request: "web.Request") -> "web.Response":
         if not self.configured:
