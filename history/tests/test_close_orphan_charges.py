@@ -1,6 +1,6 @@
 import sqlite3
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import close_orphan_charges as closer
 
@@ -169,6 +169,16 @@ class CloseOrphansTest(unittest.TestCase):
         self.assertEqual((row["start_date"], row["end_date"]), (at(2), at(9)))
         self.assertEqual(row["charge_energy_added"], 7.5)
         self.assertIsNone(row["charge_energy_used"])
+
+    def test_duration_is_capped_so_one_long_gap_does_not_block_later_orphans(self):
+        self.process(1, 1, at(2, day=1))
+        self.process(2, 1, at(2, day=1) + timedelta(days=30))
+        self.process(3, 1, at(2, day=1) + timedelta(days=31))
+        self.process(4, 1, at(2, day=1) + timedelta(days=32))
+        closed = closer.close_orphans(self.cursor)
+        self.assertEqual([c["id"] for c in closed], [1, 2, 3])
+        self.assertEqual(self.row(1)[1], 32767)
+        self.assertEqual(self.row(2)[1], 1440)
 
     def test_process_without_a_successor_is_left_open(self):
         self.process(1, 1, at(2))

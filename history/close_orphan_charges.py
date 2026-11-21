@@ -25,6 +25,8 @@ from typing import Any
 
 _LOGGER = logging.getLogger("xpengmate.history.close_orphan_charges")
 
+_MAX_DURATION_MIN = 32767
+
 _SAMPLE_COLUMNS = (
     "date",
     "ideal_battery_range_km",
@@ -62,7 +64,8 @@ def pick_end_date(
 
 def duration_min(start: datetime, end: datetime) -> int:
     """Whole minutes, rounded half up like the ``::integer`` cast the app uses."""
-    return int((end - start).total_seconds() / 60 + 0.5)
+    # charging_processes.duration_min is a smallint column.
+    return min(int((end - start).total_seconds() / 60 + 0.5), _MAX_DURATION_MIN)
 
 
 def _number(value: Any) -> float | None:

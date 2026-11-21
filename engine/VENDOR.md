@@ -17,10 +17,10 @@ the working-tree copy this engine was built from was byte-identical to it).
 | `xpeng_errors.py` | `custom_components/xpeng/xpeng_errors.py` | |
 | `mqtt_client.py` | `custom_components/xpeng/mqtt_client.py` | |
 | `vin_descriptor.py` | `custom_components/xpeng/vin_descriptor.py` | |
-| `teslamate_mapping.py` | `custom_components/xpeng/teslamate_mapping.py` | `3db249a1…` |
+| `teslamate_mapping.py` | `custom_components/xpeng/teslamate_mapping.py` | modified, now `55b6fd44…` |
 | `teslamate_provider.py` | `custom_components/xpeng/teslamate_provider.py` | `ad6d475f…` |
 
-Only two things differ from upstream:
+Only three things differ from upstream:
 
 * `const.py` is **not** vendored — upstream's imports Home Assistant's sensor and
   binary-sensor device classes. `xpeng_engine/const.py` provides the three plain
@@ -28,6 +28,10 @@ Only two things differ from upstream:
 * `teslamate_provider.py`'s `async_start_teslamate_provider()` entry point is not
   used. The engine constructs `TeslaMateProvider(source, options)` directly,
   because there is no Home Assistant coordinator to wrap.
+
+* `teslamate_mapping.py` is **modified**. `normalise_charge_state` rounds the integer
+  charge fields and derives the AC `charger_phases` (none above 270 V, which is DC).
+  A refresh must re-apply this change.
 
 Everything else in `xpeng_engine/` (`config.py`, `state.py`, `api_session.py`,
 `service.py`) is original to this project.
