@@ -167,17 +167,44 @@ CHARGE_INTEGER_FIELDS = (
 )
 
 
+def derive_ac_phases(
+    charge_state: dict[str, Any],
+    power_kw: float | None,
+    voltage: float | None,
+    current: float | None,
+) -> int | None:
+    """Phase count of an AC charge, from P = phases * V * I.
+
+    The XPENG provider never reports ``charger_phases``, and the dashboards
+    label a charge DC when it is missing. Returns None for DC or for a sample
+    without a usable power, voltage and current.
+    """
+    if as_bool(charge_state.get("fast_charger_present")):
+        return None
+    if power_kw is None or voltage is None or current is None:
+        return None
+    if power_kw <= 0 or voltage < 100 or current <= 0:
+        return None
+    return max(1, min(3, round(power_kw * 1000 / (voltage * current))))
+
+
 def normalise_charge_state(charge_state: dict[str, Any]) -> bool:
     """Make the integer charge fields insertable by TeslaMate.
 
     Returns True when the dict changed. A non-numeric value is removed (nil is
     acceptable to TeslaMate, a string is not) and a zero/negative
     ``charger_phases`` is removed because ``validate_number(:charger_phases,
-    greater_than: 0)`` would otherwise reject the entire sample.
+    greater_than: 0)`` would otherwise reject the entire sample. A missing
+    ``charger_phases`` on an AC charge is derived from power, voltage and
+    current.
 
     Whole floats count as floats here - ``0.0`` is numerically equal to ``0``
     but Ecto still refuses it - so every non-``int`` value is rewritten.
     """
+    # Read before the loop rounds them: 3.7 kW must not become 4.
+    power_kw = as_float(charge_state.get("charger_power"))
+    voltage = as_float(charge_state.get("charger_voltage"))
+    current = as_float(charge_state.get("charger_actual_current"))
     changed = False
     for field in CHARGE_INTEGER_FIELDS:
         if field not in charge_state:
@@ -195,6 +222,11 @@ def normalise_charge_state(charge_state: dict[str, Any]) -> bool:
             changed = True
         elif isinstance(value, bool) or not isinstance(value, int):
             charge_state[field] = coerced
+            changed = True
+    if charge_state.get("charger_phases") is None:
+        phases = derive_ac_phases(charge_state, power_kw, voltage, current)
+        if phases is not None:
+            charge_state["charger_phases"] = phases
             changed = True
     return changed
 
