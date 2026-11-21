@@ -21,7 +21,8 @@ Vehicle data will be published to the following topics:
 | `teslamate/cars/$car_id/download_perc`                 | 100                                                                                         | Download progress of the available update in percent                                  |
 | `teslamate/cars/$car_id/install_perc`                  | 42                                                                                          | Installation progress of the update in percent                                        |
 |                                                        |                                                                                             |                                                                                       |
-| `teslamate/cars/$car_id/model`                         | 3                                                                                           | Either "S", "3", "X" or "Y"                                                           |
+| `teslamate/cars/$car_id/vin`                           | 5YJSA1E26JF123456                                                                           | Vehicle Identification Number (VIN)                                                   |
+| `teslamate/cars/$car_id/model`                         | 3                                                                                           | Either "S", "3", "X", "Y" or "Cybertruck"                                             |
 | `teslamate/cars/$car_id/trim_badging`                  | P100D                                                                                       | Trim badging                                                                          |
 | `teslamate/cars/$car_id/exterior_color`                | DeepBlue                                                                                    | The exterior color                                                                    |
 | `teslamate/cars/$car_id/wheel_type`                    | Pinwheel18                                                                                  | The wheel type                                                                        |
@@ -98,7 +99,17 @@ Vehicle data will be published to the following topics:
 | `teslamate/cars/$car_id/service_mode`                  | false                                                                                       | Whether Service Mode is active or not                                                 |
 
 :::note
+The VIN identifies the physical car and is retained on the broker. Take care when sharing broker dumps or bridging the broker.
+
+Retained topics of a removed car stay on the broker. If a car is removed and added again, the same VIN can appear under two `car_id` values. Account for this when building a VIN-to-`car_id` mapping from `teslamate/cars/+/vin`.
+:::
+
+:::note
 `$car_id` usually starts at 1
+:::
+
+:::note
+A topic is published empty when the car reports no value for it, e.g. `speed` and `shift_state` while the car is switched off; `location` is never published empty. A topic the car has not reported since TeslaMate started is not published, so its retained value stays. While TeslaMate runs, the `odometer` never decreases and is never published empty.
 :::
 
 ### `active_route` payload examples

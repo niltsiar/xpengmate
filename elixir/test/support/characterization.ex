@@ -26,6 +26,7 @@ defmodule TeslaMate.Characterization do
         "car": {"eid": 42, "vid": 1000, "vin": "...", "model": "3", "efficiency": 0.153},
         "settings": {"use_streaming_api": false, "suspend_after_idle_min": 999999},
         "geofences": [{"name": "Home", "latitude": 52.5, "longitude": 13.35, "radius": 100}],
+        "terrain": [{"latitude": 52.5, "longitude": 13.35, "elevation": 34}],
         "await": {"state": "offline", "drives_closed": 1},
         "expect_restart": true,
         "expect_halt": true,
@@ -38,13 +39,16 @@ defmodule TeslaMate.Characterization do
           {"snapshot": true, "vehicle": {...}},
           {"error": "vehicle_unavailable"},
           {"error": {"too_many_request": 900}},
-          {"stream": "<data:update wire CSV value, decoded by TeslaApi.Stream.decode_frame!/1>"},
+          {"stream": "<data:update wire CSV value>"},
           {"stream_control": "inactive"},
           {"call": "suspend_logging"},
           {"call": "resume_logging"},
           {"call": "summary"},
           {"call": {"update_car_settings": {"suspend_after_idle_min": 1, "suspend_min": 10}}},
-          {"clock": 1704067500000}
+          {"call": {"create_geofence": {"name": "Home", "latitude": 52.5, "longitude": 13.35, "radius": 100}}},
+          {"clock": 1704067500000},
+          {"repair": "elevation"},
+          {"repair": "close_drive"}
         ]
       }
 
@@ -54,22 +58,27 @@ defmodule TeslaMate.Characterization do
   counts as one serve toward the causal barrier.
 
   A `stream` event is a `data:update` frame in its wire form — the
-  comma-separated value string — decoded by the production decoder
-  (`TeslaApi.Stream.decode_frame!/1`). `stream_control` injects a stream
-  status event: `"inactive"`, `"vehicle_offline"`, `"too_many_disconnects"`
-  or `"tokens_expired"`. The reconnecting controls make the vehicle
+  comma-separated value string — delivered through the production frame
+  handler (`TeslaApi.Stream.handle_frame/2`), tagged with the id the vehicle
+  connected the stream with: it decodes and validates the frame and passes
+  only a valid one to the receiver, as in production. The frame's `time`
+  column, decoded at load time, still advances the replay's clock, also for
+  a frame the handler drops. `stream_control` injects a stream status
+  event: `"inactive"`, `"vehicle_offline"`, `"too_many_disconnects"` or
+  `"tokens_expired"`. The reconnecting controls make the vehicle
   disconnect and reconnect the stream inside their handler; the stream seam
   answers that synchronous reconnect, and both interactions carry the serve
   before the delivery.
 
   Stream events are delivered at the serve boundary: when the next API fetch
-  arrives, `ApiMock` pushes the pending events through the receiver the
-  vehicle registered when connecting the stream, syncs on the vehicle
-  (`:sys.get_state/1` — the fetch task is parked inside the mock call while
-  the vehicle is free), and only then serves the API event. The interleaving
-  of the events list is deterministic, without a wall-clock wait. The
-  delivery runs through a proxy task and the proxy loop shared with the call
-  seam (`ApiMock.await_proxy/6`): a handler that calls back into the API
+  arrives, `ApiMock` pushes the pending events — a frame through the frame
+  handler, a control directly — to the receiver the vehicle registered when
+  connecting the stream, syncs on the vehicle (`:sys.get_state/1` — the
+  fetch task is parked inside the mock call while the vehicle is free), and
+  only then serves the API event. The interleaving of the events list is
+  deterministic, without a wall-clock wait. The delivery runs through a
+  proxy task and the proxy loop shared with the call seam
+  (`ApiMock.await_proxy/6`): a handler that calls back into the API
   (the reconnecting controls connect a new stream) is answered from the loop
   instead of deadlocking against the sync; a fetch call arriving during a
   stream delivery is a concurrent poll, not part of the delivery, and waits
@@ -95,7 +104,8 @@ defmodule TeslaMate.Characterization do
 
   A `call` event performs a user action on the vehicle; allowed are
   `"suspend_logging"`, `"resume_logging"`, `"summary"` and
-  `{"update_car_settings": {<attrs>}}` — the whitelist grows with the
+  `{"update_car_settings": {<attrs>}}` and `{"create_geofence": {<attrs>}}`
+  — the whitelist grows with the
   conversion PRs whose scenarios first need an action. `resume_logging`
   replies `"ok"`; from asleep or offline the vehicle also raises its polling
   rate and queues an immediate fetch, which production drops while a fetch
@@ -104,6 +114,7 @@ defmodule TeslaMate.Characterization do
   served by that parked poll, not by a resume fetch. `summary` replies the
   `Summary` the UI would get, pinned as canonical JSON: keys sorted, `car`
   replaced by `"$car"`, `since` as the value the replay clock produced,
+  `geofence` as its name — what the summary's consumers read of it —,
   values as Jason encodes them. `update_car_settings` runs the production
   `Settings.update_car_settings/2` (changeset, `car_settings` row) and sends
   the persisted struct to the vehicle exactly as the PubSub broadcast would;
@@ -173,7 +184,51 @@ defmodule TeslaMate.Characterization do
   event proves the outcome cycle itself completed before capture.
 
   `geofences` (optional) are created in the database before the replay;
-  geofence detection runs against the real `TeslaMate.Locations`.
+  geofence detection runs against the real `TeslaMate.Locations`. A
+  `create_geofence` call creates one between two serves through the
+  production `Locations.create_geofence/1` — what the user does in the UI
+  while the car is online, notifying the vehicle, which has applied the
+  notification before the next serve; the reply is `"ok"` or the changeset errors,
+  pinned in `calls`. The attrs are checked statically: only `name`,
+  `latitude`, `longitude` and `radius`, a non-empty map.
+
+  `terrain` (optional) declares what `Terrain.get_elevation/1` answers at
+  exact coordinates: an elevation, optionally only after a number of lookups
+  that cannot answer (`"unavailable_lookups": n` — Terrain not ready, a
+  timeout). Without streaming the
+  vehicle derives the shown elevation from the terrain at the shown
+  position; the test terrain (`TerrainMock`) answers the declared rows for
+  this replay and "no data" everywhere else, so every scenario without the
+  key keeps a terrain without data. The rows are checked statically:
+  `latitude`, `longitude` and `elevation` as numbers, optionally with a
+  positive integer `unavailable_lookups` (`terrain!/1`).
+
+  A `{"repair": "elevation"}` event runs one pass of the production
+  `TeslaMate.Terrain.Repair` — the pass production runs at start and every
+  6 hours to add the elevation that is missing from the positions of drives.
+  It is delivered at the serve boundary in list order like stream, call and
+  clock events, carries no serve index and cannot be the terminal; the
+  vehicle takes no part in it, and it leaves no reply: the repair is pinned
+  in the positions and drives it writes. The pass reads and writes the
+  replay's database through the real `Log`, runs on the replay clock, so its
+  window covers the scenario's dates, and looks up through the production
+  `TeslaMate.Terrain` with `TerrainMock` as its SRTM dependency: the
+  declared `terrain` rows answer its lookups, once the lookups at insert
+  have used up their `unavailable_lookups`. It covers every drive and is
+  awaited, not waited for: the repair runs its pass on start, before any
+  other message, so it is over when one `:sys.get_state/1` returns, and the
+  repair and Terrain are stopped before the next API event is served
+  (`Characterization.Terrain`).
+
+  A `{"repair": "close_drive"}` event runs the documented manual fix for a
+  drive that was never closed, such as one a crash left open
+  (`website/docs/maintenance/manually_fixing_data.mdx`): the production
+  `Log.close_drive/1` closes the replay's one open drive, as the rpc line
+  does with its id — no address lookup, like the rpc. It is delivered like
+  the elevation repair, at the serve boundary, without serve index, reply
+  or terminal; a replay without exactly one open drive raises
+  (`close_open_drive/0`). `elevation` and `close_drive` are the repairs
+  there are.
 
   `mqtt.discovery` (optional, default false) switches Home Assistant
   discovery on for the replay: the `VehicleSubscriber` is started per replay
@@ -294,8 +349,10 @@ defmodule TeslaMate.Characterization do
       masked as ``"<volatile>"``; comparison accepts masked positions only.
     * Goldens contain only canonical representations: JSON object/array
       payloads are stored decoded and compared structurally (encoded map key
-      order is not portable across runtimes); golden files are written with
-      sorted keys, byte-identical no matter which machine records them.
+      order is not portable across runtimes), their numbers as the payload's
+      tokens — the notation is pinned, "-5.38e-4" is not "-0.000538"
+      (`JsonNumber`, `read_golden/1`); golden files are written with sorted
+      keys, byte-identical no matter which machine records them.
     * The vehicle runs `restart: :temporary`: an unexpected crash fails the
       replay instead of being retried invisibly by the supervisor.
     * A declared crash names its check: with `expect_restart` the initial
@@ -341,7 +398,9 @@ defmodule TeslaMate.Characterization do
       handler is served through the regular exec path
       (`ApiMock.await_call_outcome/4`); an unsupported call raises
       (`call_event!/1`), as do settings attrs naming `enabled`, an unknown
-      field or nothing at all (`settings_call!/1`); every reply — acceptance
+      field or nothing at all (`settings_call!/1`), as do geofence attrs
+      naming an unknown field or nothing at all (`geofence_call!/1`); every
+      reply — acceptance
       or rejection — is captured in the golden's `calls` section (`ApiMock.calls/1`,
       `replay/2`), while a dying or never-completing call raises instead
       of hanging (`ApiMock.await_call_outcome/4`).
@@ -353,6 +412,13 @@ defmodule TeslaMate.Characterization do
       terminal is equally unprocessed at capture, it fails loudly, and the
       remedy is the same settling event. A scenario cannot end in an error
       event, which is never repeat-neutral (`build_events/1`).
+    * A repair pass is complete before the next serve: the delivery returns
+      only once the repair has handled its pass, the first thing it does,
+      and the repair and Terrain are stopped (`Characterization.Terrain`);
+      a pass that never completes raises with a named timeout
+      (`ApiMock.await_proxy/6`), an unsupported repair raises
+      (`repair_event!/1`), and a close_drive repair without exactly one
+      open drive raises (`close_open_drive/0`).
     * A replay that ends in `:suspended` raises after the awaited outcomes,
       and a barrier starved by the suspend poll interval names the state
       instead of timing out opaquely (`replay/2`, `await_serve/4`).
@@ -397,8 +463,10 @@ defmodule TeslaMate.Characterization do
 
   alias TeslaMate.Mqtt.PubSub.VehicleSubscriber
   alias TeslaMate.Vehicles.Vehicle
-  alias TeslaMate.Characterization.Clock
+  alias TeslaMate.Characterization.{Clock, JsonNumber}
   alias TeslaMate.{Locations, Log, Repo}
+
+  require Ecto.Query
 
   @fixtures_dir Path.expand("../fixtures/characterization", __DIR__)
   @volatile "<volatile>"
@@ -542,7 +610,7 @@ defmodule TeslaMate.Characterization do
     end
 
     File.mkdir_p!(Path.dirname(pair.golden_path))
-    File.write!(pair.golden_path, Jason.encode!(canonical_order(golden), pretty: true) <> "\n")
+    File.write!(pair.golden_path, encode_golden(golden))
     IO.puts("recorded #{pair.name}")
   end
 
@@ -558,7 +626,7 @@ defmodule TeslaMate.Characterization do
              "record it with CHARACTERIZATION_RECORD=#{only_target(pair)} mix test"
 
     input = read_scenario(pair)
-    expected = pair.golden_path |> File.read!() |> Jason.decode!()
+    expected = pair.golden_path |> File.read!() |> read_golden()
     actual = replay(input, :compare)
     assert_equivalent(expected, actual, pair.name, input)
   end
@@ -592,11 +660,32 @@ defmodule TeslaMate.Characterization do
 
   defp read_scenario(%Pair{scenario_path: path}), do: path |> File.read!() |> Jason.decode!()
 
+  # The numbers of the MQTT section are payload numbers and are read as the
+  # tokens the golden holds, like the captured payloads (`canonical_payload/1`);
+  # every other section keeps its decoded values.
+  @doc false
+  def read_golden(json) do
+    golden = Jason.decode!(json)
+
+    case golden do
+      %{"mqtt" => _mqtt} ->
+        {:ok, %{"mqtt" => mqtt}} = JsonNumber.decode(json)
+        %{golden | "mqtt" => mqtt}
+
+      other ->
+        other
+    end
+  end
+
+  @doc false
+  def encode_golden(golden), do: Jason.encode!(canonical_order(golden), pretty: true) <> "\n"
+
   ## Replay
 
   defp replay(input, run_id) do
     car = create_car(input)
     create_geofences(input)
+    declare_terrain(input)
     create_seed(input, car)
     events = build_events(input)
     {indexed, total} = index_events(events)
@@ -639,12 +728,18 @@ defmodule TeslaMate.Characterization do
         {:clock_delivery, ms} ->
           [{:clock_delivery, fn -> Clock.set!(ms) end}]
 
-        {:stream_delivery, %TeslaApi.Stream.Data{time: %DateTime{} = time} = frame} ->
+        {:stream_delivery, {:frame, _value, %DateTime{} = time} = frame} ->
           ms = DateTime.to_unix(time, :millisecond)
           [{:clock_delivery, fn -> Clock.advance(ms) end}, {:stream_delivery, frame}]
 
         {tag, _} = delivery when tag in [:stream_delivery, :call_delivery] ->
           [delivery]
+
+        {:repair_delivery, :elevation} ->
+          [{:repair_delivery, &__MODULE__.Terrain.repair_elevation/0}]
+
+        {:repair_delivery, :close_drive} ->
+          [{:repair_delivery, &__MODULE__.close_open_drive/0}]
 
         {:api, index, {:snapshot, result}} ->
           [{:snapshot, {:indexed, index, wrap.(result, index)}}]
@@ -707,33 +802,48 @@ defmodule TeslaMate.Characterization do
     {:ok, vehicle_pid} = start_supervised(vehicle_spec)
     crash_monitor = if expect_restart?, do: Process.monitor(vehicle_pid)
 
-    first = await_serve(total, vehicle, "initial serve", input["description"])
+    # A raise below leaves the vehicle to the test's teardown: suspended
+    # first, it is not killed inside a query (see the suspend after it).
+    try do
+      first = await_serve(total, vehicle, "initial serve", input["description"])
 
-    if expect_halt? do
-      assert_halt!(vehicle, total, input["description"])
-    else
-      # Causal barrier, not a wait: the terminal event repeats, so its next
-      # serve proves the state machine finished the previous cycle — including
-      # every persistence and publishing effect — and started the next one.
-      second = await_serve(total, vehicle, "causal barrier", input["description"])
+      if expect_halt? do
+        assert_halt!(vehicle, total, input["description"])
+      else
+        # Causal barrier, not a wait: the terminal event repeats, so its next
+        # serve proves the state machine finished the previous cycle — including
+        # every persistence and publishing effect — and started the next one.
+        second = await_serve(total, vehicle, "causal barrier", input["description"])
 
-      if two_call_cycle?(first, second) do
-        raise "the terminal event was reached through a two-call cycle — both barrier " <>
-                "serves came from the probe and strict fetch of one fetch, which proves " <>
-                "nothing; add a settling API event (#{input["description"]})"
-      end
-
-      if run_id != :compare and await != %{} do
-        assert_receive {:awaits_vacuous?, vacuous?}, 5_000
-
-        if vacuous? do
-          raise "await #{inspect(await)} is already fully satisfied at the barrier — " <>
-                  "it guards nothing; drop it or extend the scenario (#{input["description"]})"
+        if two_call_cycle?(first, second) do
+          raise "the terminal event was reached through a two-call cycle — both barrier " <>
+                  "serves came from the probe and strict fetch of one fetch, which proves " <>
+                  "nothing; add a settling API event (#{input["description"]})"
         end
-      end
 
-      await_outcomes(await, car, input["description"])
+        if run_id != :compare and await != %{} do
+          assert_receive {:awaits_vacuous?, vacuous?}, 5_000
+
+          if vacuous? do
+            raise "await #{inspect(await)} is already fully satisfied at the barrier — " <>
+                    "it guards nothing; drop it or extend the scenario (#{input["description"]})"
+          end
+        end
+
+        await_outcomes(await, car, input["description"])
+      end
+    rescue
+      error ->
+        quiesce(vehicle)
+        reraise error, __STACKTRACE__
     end
+
+    # The barrier's repeated terminal is still being processed, and
+    # processing a poll reads the database (the geofence of the shown
+    # position). Suspended, the vehicle sits between two events, so neither
+    # the teardown nor a raise below kills it inside a query — which would
+    # take the sandbox connection down with it.
+    :ok = :sys.suspend(vehicle)
 
     # A replay must not end in :suspended: the state only exists because the
     # test env shrinks the suspend poll interval to milliseconds — a golden
@@ -786,6 +896,12 @@ defmodule TeslaMate.Characterization do
     end
   end
 
+  defp quiesce(vehicle) do
+    :sys.suspend(vehicle)
+  catch
+    :exit, _not_running -> :ok
+  end
+
   defp canonical_interaction({after_serve, {:stream, action}}),
     do: %{"after_serve" => after_serve, "stream" => Atom.to_string(action)}
 
@@ -799,6 +915,7 @@ defmodule TeslaMate.Characterization do
       summary
       |> Map.from_struct()
       |> Map.put(:car, "$car")
+      |> Map.update!(:geofence, &canonical_geofence/1)
       |> Jason.encode!()
       |> Jason.decode!()
 
@@ -822,6 +939,9 @@ defmodule TeslaMate.Characterization do
       }
     }
   end
+
+  defp canonical_geofence(nil), do: nil
+  defp canonical_geofence(%Locations.GeoFence{name: name}), do: name
 
   defp with_run_id({module, _opts} = child, run_id) do
     Supervisor.child_spec(child, id: {module, run_id})
@@ -889,7 +1009,8 @@ defmodule TeslaMate.Characterization do
           {:error, String.to_existing_atom(reason)}
 
         %{"stream" => value} when is_binary(value) ->
-          {:stream_delivery, TeslaApi.Stream.decode_frame!(value)}
+          %TeslaApi.Stream.Data{time: %DateTime{} = time} = TeslaApi.Stream.decode_frame!(value)
+          {:stream_delivery, {:frame, value, time}}
 
         %{"stream" => other} ->
           raise ArgumentError,
@@ -904,6 +1025,9 @@ defmodule TeslaMate.Characterization do
         %{"clock" => ms} when is_integer(ms) ->
           {:clock_delivery, ms}
 
+        %{"repair" => repair} ->
+          {:repair_delivery, repair_event!(repair)}
+
         %{"clock" => other} ->
           raise ArgumentError, ~s("clock" takes an epoch in milliseconds, got #{inspect(other)})
       end)
@@ -911,9 +1035,10 @@ defmodule TeslaMate.Characterization do
     check_clock_monotonic!(events)
 
     case List.last(events) do
-      {tag, _} when tag in [:stream_delivery, :call_delivery, :clock_delivery] ->
-        raise "a scenario cannot end in a stream, call or clock event — the terminal must " <>
-                "be an API event, because the causal barrier repeats it"
+      {tag, _}
+      when tag in [:stream_delivery, :call_delivery, :clock_delivery, :repair_delivery] ->
+        raise "a scenario cannot end in a stream, call, clock or repair event — the terminal " <>
+                "must be an API event, because the causal barrier repeats it"
 
       {:error, _, _} ->
         raise "a scenario cannot end in a too_many_request event — its retry backoff " <>
@@ -962,7 +1087,7 @@ defmodule TeslaMate.Characterization do
       {:clock_delivery, ms}, _latest ->
         ms
 
-      {:stream_delivery, %TeslaApi.Stream.Data{time: %DateTime{} = time}}, latest ->
+      {:stream_delivery, {:frame, _value, %DateTime{} = time}}, latest ->
         max_time(latest, DateTime.to_unix(time, :millisecond))
 
       {:ok, %TeslaApi.Vehicle{drive_state: %{timestamp: ts}}}, latest when is_integer(ts) ->
@@ -991,10 +1116,36 @@ defmodule TeslaMate.Characterization do
   defp call_event!(%{"update_car_settings" => attrs}),
     do: {:update_car_settings, settings_call!(attrs)}
 
+  defp call_event!(%{"create_geofence" => attrs}),
+    do: {:create_geofence, geofence_call!(attrs)}
+
   defp call_event!(other) do
     raise ArgumentError,
           ~s(unsupported call #{inspect(other)} — allowed: "suspend_logging", ) <>
-            ~s("resume_logging", "summary", {"update_car_settings": {...}})
+            ~s("resume_logging", "summary", {"update_car_settings": {...}}, ) <>
+            ~s({"create_geofence": {...}})
+  end
+
+  @geofence_fields ~w(name latitude longitude radius)
+
+  defp geofence_call!(attrs) when attrs == %{} do
+    raise ArgumentError, "create_geofence needs the geofence fields"
+  end
+
+  defp geofence_call!(attrs) when is_map(attrs) do
+    Map.new(attrs, fn {key, value} ->
+      if key in @geofence_fields do
+        {String.to_existing_atom(key), value}
+      else
+        raise ArgumentError,
+              "unknown geofence field #{inspect(key)} in create_geofence — " <>
+                "allowed: #{inspect(@geofence_fields)}"
+      end
+    end)
+  end
+
+  defp geofence_call!(other) do
+    raise ArgumentError, "create_geofence takes a map of geofence fields, got #{inspect(other)}"
   end
 
   # Only the six settings the vehicle applies in place: toggling `enabled`
@@ -1030,6 +1181,34 @@ defmodule TeslaMate.Characterization do
           "update_car_settings takes a map of settings fields, got #{inspect(other)}"
   end
 
+  # The repairs that run outside the vehicle: production's own, on its
+  # schedule, and the documented manual fixes.
+  defp repair_event!("elevation"), do: :elevation
+  defp repair_event!("close_drive"), do: :close_drive
+
+  defp repair_event!(other) do
+    raise ArgumentError,
+          ~s(unsupported repair #{inspect(other)} — allowed: "elevation", "close_drive")
+  end
+
+  # The documented manual fix for a drive that was never closed
+  # (website/docs/maintenance/manually_fixing_data.mdx): the rpc line hands
+  # the drive by its id to the production Log.close_drive/1. A replay has
+  # one car, so the drive is the one open drive there is.
+  @doc false
+  def close_open_drive do
+    open = Repo.all(Ecto.Query.from(drive in Log.Drive, where: is_nil(drive.end_date)))
+
+    case open do
+      [drive] ->
+        {:ok, %Log.Drive{}} = Log.close_drive(drive)
+        :ok
+
+      drives ->
+        raise "a close_drive repair needs exactly one open drive, found #{length(drives)}"
+    end
+  end
+
   # The reconnecting controls (too_many_disconnects, tokens_expired) call
   # back into the API synchronously; the stream seam answers that.
   @stream_controls ~w(inactive vehicle_offline too_many_disconnects tokens_expired)
@@ -1049,7 +1228,7 @@ defmodule TeslaMate.Characterization do
   def index_events(events) do
     Enum.map_reduce(events, 0, fn
       {tag, _} = delivery, count
-      when tag in [:stream_delivery, :call_delivery, :clock_delivery] ->
+      when tag in [:stream_delivery, :call_delivery, :clock_delivery, :repair_delivery] ->
         {delivery, count}
 
       result, count ->
@@ -1257,6 +1436,38 @@ defmodule TeslaMate.Characterization do
 
   defp seed_positions!(other),
     do: raise(ArgumentError, "seed.positions takes a list of rows, got #{inspect(other)}")
+
+  # The test terrain answers the declared rows for this replay only.
+  defp declare_terrain(input) do
+    TerrainMock.declare(terrain!(Map.get(input, "terrain", [])))
+    ExUnit.Callbacks.on_exit(TerrainMock, fn -> TerrainMock.declare([]) end)
+  end
+
+  defp terrain!(rows) when is_list(rows) do
+    Enum.map(rows, fn
+      %{"latitude" => lat, "longitude" => lng, "elevation" => elevation} = row
+      when map_size(row) == 3 and is_number(lat) and is_number(lng) and is_number(elevation) ->
+        {{lat, lng}, {:ok, elevation}}
+
+      %{
+        "latitude" => lat,
+        "longitude" => lng,
+        "elevation" => elevation,
+        "unavailable_lookups" => n
+      } = row
+      when map_size(row) == 4 and is_number(lat) and is_number(lng) and is_number(elevation) and
+             is_integer(n) and n > 0 ->
+        {{lat, lng}, {:after_unavailable, n, {:ok, elevation}}}
+
+      row ->
+        raise ArgumentError,
+              "terrain rows take the numbers latitude, longitude and elevation, optionally " <>
+                "with a positive integer of unavailable_lookups, got #{inspect(row)}"
+    end)
+  end
+
+  defp terrain!(other),
+    do: raise(ArgumentError, "terrain takes a list of rows, got #{inspect(other)}")
 
   defp create_geofences(input) do
     for geofence <- Map.get(input, "geofences", []) do
@@ -1477,14 +1688,15 @@ defmodule TeslaMate.Characterization do
 
   # A payload that is a JSON object or array is stored decoded: the key order
   # of an encoded map is not a portable representation (it differs between
-  # runtimes), so goldens hold the structure, never the byte sequence. Scalar
-  # payloads ("80", "true", plain strings) stay untouched.
+  # runtimes), so goldens hold the structure, never the byte sequence. Its
+  # numbers stay tokens, since their notation is what a consumer reads.
+  # Scalar payloads ("80", "true", plain strings) stay untouched.
   def canonical_payload("{" <> _ = payload), do: decode_or_keep(payload)
   def canonical_payload("[" <> _ = payload), do: decode_or_keep(payload)
   def canonical_payload(payload), do: payload
 
   defp decode_or_keep(payload) do
-    case Jason.decode(payload) do
+    case JsonNumber.decode(payload) do
       {:ok, decoded} -> decoded
       {:error, _} -> payload
     end
@@ -1579,6 +1791,8 @@ defmodule TeslaMate.Characterization do
 
   # Golden files are written with sorted keys throughout, so a recorded file
   # is byte-identical regardless of the machine that recorded it.
+  def canonical_order(%JsonNumber{} = number), do: number
+
   def canonical_order(%{} = map) do
     map
     |> Enum.map(fn {key, value} -> {key, canonical_order(value)} end)
@@ -1590,6 +1804,10 @@ defmodule TeslaMate.Characterization do
   def canonical_order(value), do: value
 
   ## Golden: masking & comparison
+
+  def mask_volatile(%JsonNumber{} = number, number), do: number
+  def mask_volatile(%JsonNumber{}, _second), do: @volatile
+  def mask_volatile(_first, %JsonNumber{}), do: @volatile
 
   def mask_volatile(first, second) when is_map(first) and is_map(second) do
     keys = Enum.uniq(Map.keys(first) ++ Map.keys(second))
@@ -1769,6 +1987,9 @@ defmodule TeslaMate.Characterization do
   end
 
   defp diff(@volatile, _actual, _path), do: nil
+  defp diff(%JsonNumber{} = number, number, _path), do: nil
+  defp diff(%JsonNumber{} = expected, actual, path), do: {path, expected, actual}
+  defp diff(expected, %JsonNumber{} = actual, path), do: {path, expected, actual}
 
   defp diff(expected, actual, path) when is_map(expected) and is_map(actual) do
     keys = Enum.uniq(Map.keys(expected) ++ Map.keys(actual))

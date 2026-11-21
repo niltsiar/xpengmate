@@ -175,13 +175,22 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriberTest do
       elevation: 100,
       sun_roof_state: "open",
       sun_roof_installed: true,
-      sun_roof_percent_open: 80
+      sun_roof_percent_open: 80,
+      observed_nil: [
+        :charge_energy_added,
+        :charger_actual_current,
+        :charger_phases,
+        :charger_power,
+        :charger_voltage,
+        :scheduled_charging_start_time,
+        :time_to_full_charge
+      ]
     }
 
     send(pid, summary)
 
     for {key, val} <- Map.from_struct(summary),
-        not is_nil(val) and key not in [:since, :geofence] do
+        not is_nil(val) and key not in [:since, :geofence, :observed_nil] do
       topic = "teslamate/cars/0/#{key}"
       data = to_string(val)
       retain = key not in [:healthy]
@@ -252,6 +261,145 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriberTest do
     refute_receive _
   end
 
+  test "publishes floats in plain decimal notation without losing digits", %{test: name} do
+    {:ok, pid} = start_subscriber(name, 0)
+
+    assert_receive {VehiclesMock, {:subscribe_to_summary, 0}}
+
+    drain_discovery_configs()
+
+    # Only a changed value is published, so neighbours differ numerically
+    for {value, payload} <- [
+          {1000.0, "1000.0"},
+          {1200.0, "1200.0"},
+          {12300.0, "12300.0"},
+          {13000.0, "13000.0"},
+          {150_000.0, "150000.0"},
+          {-13000.0, "-13000.0"},
+          {1.0e22, "10000000000000000000000.0"},
+          {1.0e-5, "0.00001"},
+          {-2.5e-7, "-0.00000025"},
+          {1.234e-11, "0.00000000001234"},
+          {0.0, "0.0"},
+          {100.0, "100.0"},
+          {-0.0, "-0.0"},
+          {16093.0, "16093.0"},
+          {16093.44, "16093.44"},
+          {402.34, "402.34"},
+          {-1.5, "-1.5"},
+          {0.1 + 0.2, "0.30000000000000004"},
+          {52.51452123456789, "52.51452123456789"},
+          {42_000, "42000"}
+        ] do
+      send(pid, %Summary{odometer: value})
+
+      assert_receive {MqttPublisherMock,
+                      {:publish, "teslamate/cars/0/odometer", ^payload, [retain: true, qos: 1]}}
+    end
+  end
+
+  test "publishes decimals in plain decimal notation", %{test: name} do
+    {:ok, pid} = start_subscriber(name, 0)
+
+    assert_receive {VehiclesMock, {:subscribe_to_summary, 0}}
+
+    drain_discovery_configs()
+
+    for {value, payload} <- [
+          {Decimal.new("1E3"), "1000"},
+          {Decimal.new("1E-7"), "0.0000001"},
+          {Decimal.new("52.500000"), "52.500000"}
+        ] do
+      send(pid, %Summary{outside_temp: value})
+
+      assert_receive {MqttPublisherMock,
+                      {:publish, "teslamate/cars/0/outside_temp", ^payload,
+                       [retain: true, qos: 1]}}
+    end
+  end
+
+  test "publishes floats in JSON payloads in plain decimal notation", %{test: name} do
+    {:ok, pid} = start_subscriber(name, 0)
+
+    assert_receive {VehiclesMock, {:subscribe_to_summary, 0}}
+
+    drain_discovery_configs()
+
+    send(pid, %Summary{
+      latitude: 52.5,
+      longitude: 1.0e-5,
+      active_route_destination: "Berlin",
+      active_route_latitude: 52.5,
+      active_route_longitude: 1.0e-5,
+      active_route_energy_at_arrival: 12.5,
+      active_route_miles_to_arrival: 1000.0,
+      active_route_minutes_to_arrival: 15.0,
+      active_route_traffic_minutes_delay: 0
+    })
+
+    assert_receive {MqttPublisherMock,
+                    {:publish, "teslamate/cars/0/location", location, [retain: true, qos: 1]}}
+
+    assert_receive {MqttPublisherMock,
+                    {:publish, "teslamate/cars/0/active_route", active_route,
+                     [retain: true, qos: 1]}}
+
+    # The key order of the JSON objects is not specified, so the literal
+    # number tokens are asserted next to the decoded content
+    for token <- [~s("latitude":52.5), ~s("longitude":0.00001)] do
+      assert location =~ token
+    end
+
+    for token <- [
+          ~s("latitude":52.5),
+          ~s("longitude":0.00001),
+          ~s("energy_at_arrival":12.5),
+          ~s("miles_to_arrival":1000.0),
+          ~s("minutes_to_arrival":15.0),
+          ~s("traffic_minutes_delay":0)
+        ] do
+      assert active_route =~ token
+    end
+
+    assert Jason.decode!(location) == %{"latitude" => 52.5, "longitude" => 1.0e-5}
+
+    assert Jason.decode!(active_route) == %{
+             "destination" => "Berlin",
+             "energy_at_arrival" => 12.5,
+             "error" => nil,
+             "location" => %{"latitude" => 52.5, "longitude" => 1.0e-5},
+             "miles_to_arrival" => 1000.0,
+             "minutes_to_arrival" => 15.0,
+             "traffic_minutes_delay" => 0
+           }
+  end
+
+  test "publishes vehicle VIN only when it changes", %{test: name} do
+    {:ok, pid} = start_subscriber(name, 0)
+
+    send(pid, %Summary{})
+    refute_receive {MqttPublisherMock, {:publish, "teslamate/cars/0/vin", _, _}}
+
+    summary = %Summary{car: %Car{vin: "5YJSA1E26JF123456"}}
+    send(pid, summary)
+
+    assert_receive {MqttPublisherMock,
+                    {:publish, "teslamate/cars/0/vin", "5YJSA1E26JF123456",
+                     [retain: true, qos: 1]}}
+
+    send(pid, summary)
+    refute_receive {MqttPublisherMock, {:publish, "teslamate/cars/0/vin", _, _}}
+
+    send(pid, %Summary{car: %Car{vin: "5YJSA1E26JF654321"}})
+
+    assert_receive {MqttPublisherMock,
+                    {:publish, "teslamate/cars/0/vin", "5YJSA1E26JF654321",
+                     [retain: true, qos: 1]}}
+
+    send(pid, %Summary{car: %Car{vin: nil}})
+    refute_receive {MqttPublisherMock, {:publish, "teslamate/cars/0/vin", _, _}}
+  end
+
   test "publishes available software update state", %{test: name} do
     {:ok, pid} = start_subscriber(name, 0)
 
@@ -296,7 +444,8 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriberTest do
       ideal_battery_range_km: 230.52,
       rated_battery_range_km: 230.52,
       scheduled_charging_start_time: DateTime.utc_now() |> DateTime.add(60 * 60 * 10, :second),
-      time_to_full_charge: 2.5
+      time_to_full_charge: 2.5,
+      observed_nil: [:shift_state, :geofence]
     }
 
     send(pid, summary)
@@ -307,7 +456,7 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriberTest do
                     {:publish, "teslamate/cars/0/healthy", "", [retain: true, qos: 1]}}
 
     for {key, val} <- Map.from_struct(summary),
-        not is_nil(val) and key != :scheduled_charging_start_time do
+        not is_nil(val) and key not in [:scheduled_charging_start_time, :observed_nil] do
       topic = "teslamate/cars/0/#{key}"
       data = to_string(val)
       retain = key not in [:healthy]
@@ -321,7 +470,7 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriberTest do
                     {:publish, "teslamate/cars/0/scheduled_charging_start_time", ^iso_time,
                      [retain: true, qos: 1]}}
 
-    # Always published
+    # Observed nil values are published empty; the trim badging always is
     assert_receive {MqttPublisherMock,
                     {:publish, "teslamate/cars/0/shift_state", "", [retain: true, qos: 1]}}
 
@@ -356,6 +505,60 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriberTest do
                     {:publish, "teslamate/cars/0/healthy", "", [retain: false, qos: 1]}}
 
     refute_receive _
+  end
+
+  test "publishes nil values only once they are observed", %{test: name} do
+    {:ok, pid} = start_subscriber(name, 0)
+
+    assert_receive {VehiclesMock, {:subscribe_to_summary, 0}}
+
+    drain_discovery_configs()
+
+    # Nothing observed since the start: the retained values stay
+    send(pid, %Summary{state: :asleep})
+    assert_receive {MqttPublisherMock, {:publish, "teslamate/cars/0/state", "asleep", _}}
+    assert_receive {MqttPublisherMock, {:publish, "teslamate/cars/0/trim_badging", "", _}}
+
+    for key <- [:speed, :shift_state, :outside_temp, :charger_power, :elevation, :geofence] do
+      topic = "teslamate/cars/0/#{key}"
+      refute_receive {MqttPublisherMock, {:publish, ^topic, _, _}}
+    end
+
+    # The car reports no value: published as an empty retained topic
+    send(pid, %Summary{
+      state: :online,
+      speed: 16,
+      observed_nil: [:shift_state, :outside_temp, :charger_power, :elevation, :geofence]
+    })
+
+    assert_receive {MqttPublisherMock, {:publish, "teslamate/cars/0/speed", "16", _}}
+
+    for key <- [:shift_state, :outside_temp, :charger_power, :elevation, :geofence] do
+      topic = "teslamate/cars/0/#{key}"
+      assert_receive {MqttPublisherMock, {:publish, ^topic, "", [retain: true, qos: 1]}}
+    end
+
+    send(pid, %Summary{state: :online, observed_nil: [:speed]})
+    assert_receive {MqttPublisherMock, {:publish, "teslamate/cars/0/speed", "", _}}
+  end
+
+  test "never publishes an empty location", %{test: name} do
+    {:ok, pid} = start_subscriber(name, 0)
+
+    assert_receive {VehiclesMock, {:subscribe_to_summary, 0}}
+
+    drain_discovery_configs()
+
+    send(pid, %Summary{state: :online, latitude: 52.5, longitude: 13.4})
+    assert_receive {MqttPublisherMock, {:publish, "teslamate/cars/0/location", _, _}}
+
+    # The car reports no position: latitude and longitude are cleared, the
+    # location — the device tracker's JSON attributes — keeps its last value
+    send(pid, %Summary{state: :online, observed_nil: [:latitude, :longitude]})
+
+    assert_receive {MqttPublisherMock, {:publish, "teslamate/cars/0/latitude", "", _}}
+    assert_receive {MqttPublisherMock, {:publish, "teslamate/cars/0/longitude", "", _}}
+    refute_receive {MqttPublisherMock, {:publish, "teslamate/cars/0/location", _, _}}
   end
 
   test "publishes geofence only if it has changed", %{test: name} do
@@ -396,7 +599,7 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriberTest do
 
     assert_receive {VehiclesMock, {:subscribe_to_summary, 0}}
 
-    summary = %Summary{display_name: "Foo", version: "1"}
+    summary = %Summary{display_name: "Foo", version: "1", observed_nil: [:shift_state]}
     send(pid, summary)
 
     assert_receive {MqttPublisherMock, {:publish, ^display_name_topic, "Foo", _}}
@@ -423,8 +626,20 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriberTest do
     drain_discovery_configs()
 
     summary = %Summary{
+      car: %Car{vin: "5YJSA1E26JF123456"},
       display_name: "Foo",
-      state: :online
+      state: :online,
+      observed_nil: [
+        :charge_energy_added,
+        :charger_actual_current,
+        :charger_phases,
+        :charger_power,
+        :charger_voltage,
+        :scheduled_charging_start_time,
+        :time_to_full_charge,
+        :shift_state,
+        :geofence
+      ]
     }
 
     send(pid, summary)
@@ -439,10 +654,14 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriberTest do
                      [retain: true, qos: 1]}}
 
     assert_receive {MqttPublisherMock,
+                    {:publish, "teslamate/account_0/cars/0/vin", "5YJSA1E26JF123456",
+                     [retain: true, qos: 1]}}
+
+    assert_receive {MqttPublisherMock,
                     {:publish, "teslamate/account_0/cars/0/state", "online",
                      [retain: true, qos: 1]}}
 
-    # Always published
+    # Observed nil values are published empty; the trim badging always is
     for key <- [
           :charge_energy_added,
           :charger_actual_current,

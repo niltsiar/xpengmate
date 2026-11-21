@@ -179,6 +179,7 @@
     "teslamate/cars/$car/active_route_latitude": ["nil"],
     "teslamate/cars/$car/active_route_longitude": ["nil"],
     "teslamate/cars/$car/battery_level": ["64"],
+    "teslamate/cars/$car/display_name": ["blue"],
     "teslamate/cars/$car/est_battery_range_km": ["268.07"],
     "teslamate/cars/$car/geofence": [""],
     "teslamate/cars/$car/healthy": ["", "true"],
@@ -200,6 +201,7 @@
     "teslamate/cars/$car/state": ["asleep"],
     "teslamate/cars/$car/trim_badging": [""],
     "teslamate/cars/$car/usable_battery_level": ["64"],
-    "teslamate/cars/$car/version": ["2026.20.1"]
+    "teslamate/cars/$car/version": ["2026.20.1"],
+    "teslamate/cars/$car/vin": ["5YJ3E1EA1KF000001"]
   }
 }

@@ -4,6 +4,7 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriber do
   require Logger
   import Core.Dependency, only: [call: 3]
 
+  alias TeslaMate.Log.Car
   alias TeslaMate.Mqtt.Publisher
   alias TeslaMate.Mqtt.PubSub.HomeAssistant
   alias TeslaMate.Vehicles.Vehicle.Summary
@@ -117,21 +118,26 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriber do
 
   defp clear_discovery(%State{}), do: :ok
 
-  @publish_if_nil ~w(charge_energy_added charger_actual_current charger_phases
-                       charger_power charger_voltage scheduled_charging_start_time
-                       time_to_full_charge shift_state geofence trim_badging)a
+  # A nil value of the car is published (as an empty retained topic) once it
+  # is an observation (`Summary.observed_nil`); a field not observed since the
+  # start is not published, so its retained value stays. The stored car's
+  # trim badging is no observation and is always published. The location is
+  # the JSON attributes topic of the Home Assistant device tracker and never
+  # published empty.
+  @publish_if_nil ~w(trim_badging)a
 
   @impl true
   def handle_info(%Summary{} = summary, %State{} = state) do
     values =
       %{}
       |> add_simple_values(summary)
+      |> add_vin(summary)
       |> add_software_update(state.last_values)
       |> add_car_latitude_longitude(summary)
       |> add_geofence(summary)
       |> add_active_route(summary)
 
-    last_values = publish_values(values, state)
+    last_values = publish_values(values, summary.observed_nil ++ @publish_if_nil, state)
 
     state = maybe_publish_discovery(summary, state)
 
@@ -255,13 +261,13 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriber do
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
   end
 
-  defp publish_values(values, state) do
+  defp publish_values(values, publish_if_nil, state) do
     last_values = state.last_values || %{}
 
     values
     |> Stream.reject(&match?({_key, :unknown}, &1))
     |> Stream.filter(fn {key, value} ->
-      ((key in @publish_if_nil or value != nil) and
+      ((key in publish_if_nil or value != nil) and
          (not Map.has_key?(last_values, key) or Map.get(last_values, key) != value)) or
         key in @do_not_retain
     end)
@@ -303,6 +309,9 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriber do
     Map.merge(map, Map.take(summary, @simple_values))
   end
 
+  defp add_vin(map, %Summary{car: %Car{vin: vin}}), do: Map.put(map, :vin, vin)
+  defp add_vin(map, %Summary{}), do: map
+
   defp add_software_update(map, last_values) do
     values =
       (last_values || %{})
@@ -313,7 +322,7 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriber do
          latest_version when is_binary(latest_version) <-
            if(update_available, do: values[:update_version], else: version) do
       software_update =
-        Jason.encode!(%{
+        encode_json(%{
           installed_version: version,
           latest_version: latest_version
         })
@@ -343,16 +352,20 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriber do
             latitude: lat,
             longitude: lon
           }
-          |> Jason.encode!()
+          |> encode_json()
 
         Map.put(map, :location, location)
     end
   end
 
+  # Without a geofence, the default geofence is published once the shown
+  # position is observed.
   defp add_geofence(map, %Summary{} = summary) do
     case summary.geofence do
       nil ->
-        Map.put(map, :geofence, Application.get_env(:teslamate, :default_geofence))
+        if :geofence in summary.observed_nil,
+          do: Map.put(map, :geofence, Application.get_env(:teslamate, :default_geofence)),
+          else: map
 
       geofence ->
         Map.put(map, :geofence, geofence.name)
@@ -364,7 +377,7 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriber do
       %{
         error: "No active route available"
       }
-      |> Jason.encode!()
+      |> encode_json()
 
     Map.merge(
       map,
@@ -394,7 +407,7 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriber do
         location: location,
         error: nil
       }
-      |> Jason.encode!()
+      |> encode_json()
 
     Map.merge(map, %{
       active_route_destination: summary.active_route_destination,
@@ -418,5 +431,28 @@ defmodule TeslaMate.Mqtt.PubSub.VehicleSubscriber do
   end
 
   defp to_str(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
+  # to_string/1 of a Decimal is scientific ("1E+3")
+  defp to_str(%Decimal{} = decimal), do: Decimal.to_string(decimal, :normal)
+  defp to_str(value) when is_float(value), do: plain_float(value)
   defp to_str(value), do: to_string(value)
+
+  # Jason writes floats like Float.to_string/1, so they are embedded with the
+  # plain digits instead. Structs (Decimals) are left to Jason.
+  defp encode_json(map), do: map |> plain_floats() |> Jason.encode!()
+
+  defp plain_floats(float) when is_float(float), do: Jason.Fragment.new(plain_float(float))
+  defp plain_floats(%_{} = struct), do: struct
+  defp plain_floats(map) when is_map(map), do: Map.new(map, fn {k, v} -> {k, plain_floats(v)} end)
+  defp plain_floats(list) when is_list(list), do: Enum.map(list, &plain_floats/1)
+  defp plain_floats(value), do: value
+
+  # Float.to_string/1 uses exponent notation when that is shorter (13000.0
+  # is "1.3e4"). Decimal.from_float/1 carries the same shortest digits, which
+  # are written out in plain notation; whole numbers keep their ".0".
+  defp plain_float(float) do
+    case Decimal.from_float(float) do
+      %Decimal{exp: exp} = decimal when exp >= 0 -> Decimal.to_string(decimal, :normal) <> ".0"
+      decimal -> Decimal.to_string(decimal, :normal)
+    end
+  end
 end
