@@ -177,6 +177,11 @@ class DeriveChargerPhasesTest(unittest.TestCase):
         normalise_charge_state(charge)
         self.assertIsNone(charge["charger_phases"])
 
+    def test_dc_sample_below_the_fast_charger_threshold_gets_no_phases(self) -> None:
+        charge = self.ac_sample(12.0, 430.0, 27.9)
+        normalise_charge_state(charge)
+        self.assertIsNone(charge["charger_phases"])
+
     def test_idle_or_incomplete_sample_gets_no_phases(self) -> None:
         cases = {
             "zero power": self.ac_sample(0.0, 231.3, 16.0),

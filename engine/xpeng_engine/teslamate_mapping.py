@@ -167,6 +167,10 @@ CHARGE_INTEGER_FIELDS = (
 )
 
 
+#: AC supply voltage per phase never exceeds about 253 V.
+_MAX_AC_VOLTAGE = 270.0
+
+
 def derive_ac_phases(
     charge_state: dict[str, Any],
     power_kw: float | None,
@@ -176,14 +180,17 @@ def derive_ac_phases(
     """Phase count of an AC charge, from P = phases * V * I.
 
     The XPENG provider never reports ``charger_phases``, and the dashboards
-    label a charge DC when it is missing. Returns None for DC or for a sample
-    without a usable power, voltage and current.
+    label a charge DC when it is missing. Returns None for DC, for a voltage
+    above any AC supply (a DC ramp-up or taper can fall below the fast-charger
+    power threshold) or for a sample without a usable power, voltage and current.
     """
     if as_bool(charge_state.get("fast_charger_present")):
         return None
     if power_kw is None or voltage is None or current is None:
         return None
     if power_kw <= 0 or voltage < 100 or current <= 0:
+        return None
+    if voltage > _MAX_AC_VOLTAGE:
         return None
     return max(1, min(3, round(power_kw * 1000 / (voltage * current))))
 
