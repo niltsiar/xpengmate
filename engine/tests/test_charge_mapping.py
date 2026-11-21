@@ -17,6 +17,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -126,6 +127,82 @@ class NormaliseChargeStateTest(unittest.TestCase):
 
     def test_empty_charge_state_is_unchanged(self) -> None:
         self.assertFalse(normalise_charge_state({}))
+
+
+class DeriveChargerPhasesTest(unittest.TestCase):
+    """The provider sends charger_phases null; the dashboards read it as DC."""
+
+    @staticmethod
+    def ac_sample(power: float, voltage: float, current: float, **extra: Any) -> dict[str, Any]:
+        return {
+            "charger_phases": None,
+            "charger_power": power,
+            "charger_voltage": voltage,
+            "charger_actual_current": current,
+            "fast_charger_present": False,
+            **extra,
+        }
+
+    def test_single_phase_sample_gets_one_phase(self) -> None:
+        charge = self.ac_sample(3.7, 231.3, 16.0)
+        self.assertTrue(normalise_charge_state(charge))
+        self.assertEqual(charge["charger_phases"], 1)
+        self.assertIsInstance(charge["charger_phases"], int)
+
+    def test_three_phase_sample_gets_three_phases(self) -> None:
+        charge = self.ac_sample(11.0, 230.0, 16.0)
+        self.assertTrue(normalise_charge_state(charge))
+        self.assertEqual(charge["charger_phases"], 3)
+
+    def test_missing_phases_key_is_derived_too(self) -> None:
+        charge = self.ac_sample(3.7, 231.3, 16.0)
+        del charge["charger_phases"]
+        normalise_charge_state(charge)
+        self.assertEqual(charge["charger_phases"], 1)
+
+    def test_derived_phases_are_clamped_to_one_through_three(self) -> None:
+        for power, expected in ((0.2, 1), (22.0, 3)):
+            with self.subTest(power=power):
+                charge = self.ac_sample(power, 230.0, 16.0)
+                normalise_charge_state(charge)
+                self.assertEqual(charge["charger_phases"], expected)
+
+    def test_zero_phases_are_replaced_by_the_derived_value(self) -> None:
+        charge = self.ac_sample(3.7, 231.3, 16.0, charger_phases=0)
+        normalise_charge_state(charge)
+        self.assertEqual(charge["charger_phases"], 1)
+
+    def test_dc_charge_gets_no_phases(self) -> None:
+        charge = self.ac_sample(60.0, 400.0, 150.0, fast_charger_present=True)
+        normalise_charge_state(charge)
+        self.assertIsNone(charge["charger_phases"])
+
+    def test_idle_or_incomplete_sample_gets_no_phases(self) -> None:
+        cases = {
+            "zero power": self.ac_sample(0.0, 231.3, 16.0),
+            "zero current": self.ac_sample(3.7, 231.3, 0.0),
+            "low voltage": self.ac_sample(3.7, 0.0, 16.0),
+            "no voltage": {**self.ac_sample(3.7, 231.3, 16.0), "charger_voltage": None},
+            "no current": {**self.ac_sample(3.7, 231.3, 16.0), "charger_actual_current": None},
+            "no power": {**self.ac_sample(3.7, 231.3, 16.0), "charger_power": None},
+        }
+        for name, charge in cases.items():
+            with self.subTest(name):
+                normalise_charge_state(charge)
+                self.assertIsNone(charge["charger_phases"])
+
+    def test_valid_provider_phases_are_kept(self) -> None:
+        charge = self.ac_sample(3.7, 231.3, 16.0, charger_phases=3)
+        normalise_charge_state(charge)
+        self.assertEqual(charge["charger_phases"], 3)
+
+    def test_native_mapping_derives_phases(self) -> None:
+        raw = {
+            "instant": {**CHARGING_RAW["instant"]},
+            "interval": {"charge": {"power": 3.7, "voltage": 231.3, "electricity": 16.0}},
+        }
+        charge = build_charge_state(Telemetry(vin=VIN, raw=raw))
+        self.assertEqual(charge["charger_phases"], 1)
 
 
 class BuildChargeStateTest(unittest.TestCase):
