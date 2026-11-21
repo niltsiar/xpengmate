@@ -18,7 +18,7 @@ defmodule TeslaMate.UpdaterTest do
         {Tesla.Adapter.Finch, [],
          call: fn %Tesla.Env{} = env, _opts ->
            assert env.url ==
-                    "https://api.github.com/repos/teslamate-org/teslamate/releases/latest"
+                    "https://api.github.com/repos/niltsiar/xpengmate/releases/latest"
 
            resp
          end}
@@ -36,7 +36,7 @@ defmodule TeslaMate.UpdaterTest do
   end
 
   test "informs if an update is available", %{test: name} do
-    with_mocks HTTPMocck.vsn("v5.1.2") do
+    with_mocks HTTPMocck.vsn("xm-5.1.2") do
       ## current_version > new_version
       {:ok, pid} = start_updater(name, "5.1.3-dev", id: 0)
       assert_update_check_count(pid, 1)
@@ -83,6 +83,15 @@ defmodule TeslaMate.UpdaterTest do
   end
 
   @tag :capture_log
+  test "ignores tags without the xm- prefix", %{test: name} do
+    with_mocks HTTPMocck.vsn("v5.1.2") do
+      {:ok, pid} = start_updater(name, "1.0.0")
+      await_update_check(pid)
+      assert nil == Updater.get_update(pid)
+    end
+  end
+
+  @tag :capture_log
   test "handles invalid json", %{test: name} do
     with_mocks HTTPMocck.json(%{"foo" => "bar"}) do
       {:ok, pid} = start_updater(name, "1.0.0")
@@ -107,13 +116,17 @@ defmodule TeslaMate.UpdaterTest do
   end
 
   test "handles prereleases and drafts", %{test: name} do
-    with_mocks HTTPMocck.json(%{"tag_name" => "v99.0.0", "prerelease" => true, "draft" => false}) do
+    release = %{"tag_name" => "xm-99.0.0", "prerelease" => true, "draft" => false}
+
+    with_mocks HTTPMocck.json(release) do
       {:ok, pid} = start_updater(name, "1.0.0", id: 0)
       await_update_check(pid)
       assert nil == Updater.get_update(pid)
     end
 
-    with_mocks HTTPMocck.json(%{"tag_name" => "v99.0.0", "prerelease" => false, "draft" => true}) do
+    release = %{"tag_name" => "xm-99.0.0", "prerelease" => false, "draft" => true}
+
+    with_mocks HTTPMocck.json(release) do
       {:ok, pid} = start_updater(name, "1.0.0", id: 1)
       await_update_check(pid)
       assert nil == Updater.get_update(pid)

@@ -95,7 +95,7 @@ tests pin them.
   `vehicle_state.car_version` changes. The engine polls XPENG's OTA status and
   feeds that version in, so the Updates dashboard and the Grafana updates
   dashboard show XPENG XOS transitions.
-* **XpengMate's own update check** points at `xpengtoolkit/xpengmate` instead of
+* **XpengMate's own update check** points at `niltsiar/xpengmate` (tags `xm-<version>`) instead of
   `teslamate-org/teslamate`, so the footer does not advertise upstream releases.
 
 ## What the history importer writes

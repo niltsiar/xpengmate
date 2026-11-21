@@ -90,7 +90,7 @@ defmodule TeslaMate.Updater do
   ## Private
 
   defp fetch_release do
-    case get("/repos/xpengtoolkit/xpengmate/releases/latest") do
+    case get("/repos/niltsiar/xpengmate/releases/latest") do
       {:ok, %Tesla.Env{status: 200, body: body}} ->
         parse_release(body)
 
@@ -104,7 +104,7 @@ defmodule TeslaMate.Updater do
 
   defp parse_release(release) do
     case release do
-      %{"tag_name" => "v" <> tag, "prerelease" => prerelease?, "draft" => draft?} ->
+      %{"tag_name" => "xm-" <> tag, "prerelease" => prerelease?, "draft" => draft?} ->
         case Version.parse(tag) do
           {:ok, version} ->
             {:ok, %Release{version: to_string(version), prerelease: prerelease? or draft?}}
