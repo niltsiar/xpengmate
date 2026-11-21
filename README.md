@@ -1,5 +1,8 @@
 # XpengMate
 
+> This repository is a modified copy of [XpengMate](https://github.com/xpengtoolkit/xpengmate), maintained for personal use.
+> It is not the original XpengMate or TeslaMate.
+
 **A self-hosted data logger and history browser for an XPENG — a rebranded,
 XPENG-native fork of [TeslaMate](https://github.com/teslamate-org/teslamate).**
 
