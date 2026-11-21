@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import tempfile
@@ -105,6 +106,26 @@ class HealthzTest(_ServerCase):
     async def test_status_still_requires_the_token(self):
         response = await self.client.get("/status")
         self.assertEqual(response.status, 401)
+
+
+class OrphanCloserLoopTest(_ServerCase):
+    async def test_runs_at_start_and_then_on_the_interval(self):
+        runs = []
+        with (
+            mock.patch.object(server, "DATABASE_URL", "postgresql://test"),
+            mock.patch.object(server, "ORPHAN_CLOSE_INTERVAL", 0.01),
+            mock.patch.object(server.HistoryService, "_close_orphans", lambda self: runs.append(1)),
+        ):
+            await self.service.start()
+            await asyncio.sleep(0.1)
+            await self.service.stop()
+        self.assertGreaterEqual(len(runs), 2)
+
+    async def test_does_not_run_without_a_database(self):
+        with mock.patch.object(server.HistoryService, "_close_orphans") as close:
+            await self.service.start()
+            await self.service.stop()
+        close.assert_not_called()
 
 
 class SeedFromEnvTest(unittest.TestCase):

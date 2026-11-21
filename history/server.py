@@ -30,6 +30,8 @@ from typing import Any
 
 import psycopg
 
+from close_orphan_charges import close_orphans
+
 try:
     import aiohttp
     from aiohttp import web
@@ -47,6 +49,7 @@ EXPORT_LAST_RUN = os.environ.get("HISTORY_EXPORT_LAST_RUN", "/data/export_last_r
 EXPORT_UPLOAD_DIR = os.environ.get("HISTORY_EXPORT_DIR", "/data/exports/uploaded")
 DATABASE_URL = os.environ.get("XPENGMATE_DATABASE_URL", "")
 TOKEN = os.environ.get("XPENGMATE_HISTORY_TOKEN", "")
+ORPHAN_CLOSE_INTERVAL = float(os.environ.get("HISTORY_ORPHAN_CLOSE_INTERVAL_SECONDS", "600"))
 
 _TRUE = {"1", "true", "yes", "on"}
 
@@ -211,6 +214,7 @@ class HistoryService:
         self._process: asyncio.subprocess.Process | None = None
         self._task: asyncio.Task[Any] | None = None
         self._export_task: asyncio.Task[Any] | None = None
+        self._orphan_task: asyncio.Task[Any] | None = None
         self._config = read_json(CONFIG_PATH)
         self._session: "aiohttp.ClientSession | None" = None
 
@@ -227,14 +231,31 @@ class HistoryService:
 
     async def start(self) -> None:
         self._session = aiohttp.ClientSession()
+        if DATABASE_URL and ORPHAN_CLOSE_INTERVAL > 0:
+            self._orphan_task = asyncio.create_task(self._close_orphans_forever())
 
     async def stop(self) -> None:
         if self._task is not None:
             self._task.cancel()
         if self._export_task is not None:
             self._export_task.cancel()
+        if self._orphan_task is not None:
+            self._orphan_task.cancel()
         if self._session is not None:
             await self._session.close()
+
+    async def _close_orphans_forever(self) -> None:
+        while True:
+            try:
+                await asyncio.to_thread(self._close_orphans)
+            except Exception:  # noqa: BLE001 - the database may not be up yet
+                _LOGGER.warning("closing orphaned charging processes failed", exc_info=True)
+            await asyncio.sleep(ORPHAN_CLOSE_INTERVAL)
+
+    def _close_orphans(self) -> None:
+        with psycopg.connect(DATABASE_URL, autocommit=True) as connection:
+            with connection.cursor() as cursor:
+                close_orphans(cursor)
 
     # -- handlers ---------------------------------------------
 
