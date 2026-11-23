@@ -18,6 +18,7 @@ import heapq
 import io
 import logging
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -120,7 +121,7 @@ def iter_samples(zip_path: str) -> Iterator[tuple[int, dict]]:
         yield from _merge(operation, energy)
 
 
-def _clean(sample: dict) -> tuple[int | None, float | None, float | None]:
+def clean_sample(sample: dict) -> tuple[int | None, float | None, float | None]:
     soc = sample.get("soc")
     if soc is not None and (soc < 0 or soc >= SOC_SENTINEL):
         soc = None
@@ -138,8 +139,8 @@ def _clean(sample: dict) -> tuple[int | None, float | None, float | None]:
 
 
 def nearest_samples(
-    positions: Iterable[tuple[int, int]], samples: Iterator[tuple[int, dict]]
-) -> Iterator[tuple[int, tuple[int, dict]]]:
+    positions: Iterable[tuple[Any, int]], samples: Iterator[tuple[int, dict]]
+) -> Iterator[tuple[Any, tuple[int, dict]]]:
     """Pair each (id, unix seconds) position, in time order, with the closest sample within tolerance."""
     before: tuple[int, dict] | None = None
     after = next(samples, None)
@@ -149,6 +150,21 @@ def nearest_samples(
         close = [s for s in (before, after) if s is not None and abs(s[0] - epoch_seconds) <= TOLERANCE_SECONDS]
         if close:
             yield position_id, min(close, key=lambda sample: abs(sample[0] - epoch_seconds))
+
+
+def samples_at(
+    zip_paths: list[str], moments: list[datetime]
+) -> dict[datetime, tuple[int | None, float | None, float | None]]:
+    """The cleaned sample nearest to each naive-UTC moment, from the first zip that has one."""
+    found: dict[datetime, tuple[int | None, float | None, float | None]] = {}
+    for zip_path in zip_paths:
+        wanted = sorted(moment for moment in set(moments) if moment not in found)
+        if not wanted:
+            break
+        positions = [(moment, int(moment.replace(tzinfo=timezone.utc).timestamp())) for moment in wanted]
+        for moment, chosen in nearest_samples(positions, iter_samples(zip_path)):
+            found[moment] = clean_sample(chosen[1])
+    return found
 
 
 def resolve_zip(path: str) -> str:
@@ -190,7 +206,7 @@ def enrich(store: Any, zip_path: str) -> int:
     updates: list[tuple[int, int, float | None, float | None, float | None]] = []
     matched = 0
     for position_id, chosen in nearest_samples(positions, iter_samples(zip_path)):
-        soc, odometer, range_km = _clean(chosen[1])
+        soc, odometer, range_km = clean_sample(chosen[1])
         if soc is None and odometer is None and range_km is None:
             continue
         updates.append((position_id, soc, odometer, range_km))

@@ -6,13 +6,16 @@ same drives and charges more than once. This command:
 1. parses every zip and merges the windows (`export_parser.merge_exports`), so a
    drive cut at a window edge is stitched and a drive described twice is kept
    once;
-2. inserts only what is genuinely new: a record that overlaps an existing drive
+2. replaces the drive times that the gap repair guessed with the export's trip
+   times (`reconcile_drive_edges`), for every zip given, imported before or not;
+3. inserts only what is genuinely new: a record that overlaps an existing drive
    or charging session from any source (live logger, EVConduit, a previous
    export) is skipped, because those sources carry richer data - GPS in
-   particular - and re-inserting would duplicate history;
-3. attaches the export's SoC/odometer/range to existing GPS positions and the
+   particular - and re-inserting would duplicate history. A trip whose km an
+   existing drive holds is skipped too, even when the recorded times differ;
+4. attaches the export's SoC/odometer/range to existing GPS positions and the
    hourly tyre pressures to the nearest position;
-4. records each imported file by content hash, so re-uploading the same file is
+5. records each imported file by content hash, so re-uploading the same file is
    a no-op and the settings page can list what has been imported.
 
 Deliberately absent: positions. The export has no coordinates, and inventing
@@ -34,6 +37,8 @@ from typing import Any
 import psycopg
 
 import export_enrich
+import reconcile_drive_edges
+import repair_drive_gaps
 from export_parser import Charge, ExportData, MergedExport, Drive, parse_files
 from import_history import Store, naive_utc
 
@@ -74,6 +79,16 @@ def _iso(epoch: int) -> str:
     return dt.datetime.fromtimestamp(epoch, dt.timezone.utc).isoformat()
 
 
+def _km_covered(drive: Drive, kms: list[tuple[float, float]]) -> bool:
+    if drive.odometer_start is None or drive.odometer_end is None:
+        return False
+    length = drive.odometer_end - drive.odometer_start
+    return any(
+        min(high, drive.odometer_end) - max(low, drive.odometer_start) > DRIVE_OVERLAP_RATIO * length
+        for low, high in kms
+    )
+
+
 class Importer:
     def __init__(self, dsn: str, vin: str, usable_kwh: float) -> None:
         self.store = Store(dsn, vin, usable_kwh)
@@ -98,7 +113,12 @@ class Importer:
         self.store.prepare()
         with self.conn.cursor() as cur:
             cur.execute(SCHEMA)
+            cur.execute(repair_drive_gaps.SCHEMA)
+            cur.execute(repair_drive_gaps.ADD_CONFIRMED_COLUMNS)
         self.conn.commit()
+        # A session lock, so it outlasts the per-row commits; closing the connection releases it.
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(%s)", (repair_drive_gaps.DRIVES_LOCK_KEY,))
 
     def seen(self, sha256: str) -> bool:
         with self.conn.cursor() as cur:
@@ -178,11 +198,33 @@ class Importer:
             )
             return {int(row[0]): row[1] for row in cur.fetchall() if row[0] is not None}
 
+    def existing_kms(self) -> list[tuple[float, float]]:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT start_km, end_km FROM drives"
+                " WHERE car_id = %s AND start_km IS NOT NULL AND end_km IS NOT NULL",
+                (self.store.car_id,),
+            )
+            return [(float(row[0]), float(row[1])) for row in cur.fetchall()]
+
     # -- drives -----------------------------------------------
+
+    def reconcile(self, drives: list[Drive], paths: list[str]) -> dict[str, Any]:
+        """Move guessed drive edges to the export's trip times, in the open transaction."""
+        trips = [
+            reconcile_drive_edges.Trip(naive_utc(d.start), naive_utc(d.end), d.odometer_start, d.odometer_end)
+            for d in drives
+            if d.odometer_start is not None and d.odometer_end is not None
+        ]
+        with self.conn.cursor() as cur:
+            return reconcile_drive_edges.reconcile(
+                cur, self.store.car_id, trips, lambda moments: export_enrich.samples_at(paths, moments)
+            )
 
     def import_drives(self, drives: list[Drive], existing: list[tuple[int, int, int]]) -> None:
         export_tracked = self.tracked_export_ids("export-drive")
         windows = [(start, end, row_id, row_id in export_tracked) for row_id, start, end in existing]
+        kms = self.existing_kms()
         for drive in drives:
             duration = max(1, drive.duration_seconds)
             overlapping = [
@@ -190,6 +232,9 @@ class Importer:
                 for start, end, row_id, is_export in windows
                 if drive.start <= end and drive.end >= start
             ]
+            if not overlapping and _km_covered(drive, kms):
+                self.skipped_drives += 1
+                continue
             if overlapping:
                 # A longer version from a newer window replaces a truncated one.
                 replace: tuple[int, int, int] | None = None
@@ -209,6 +254,8 @@ class Importer:
                 self.merged_drives += 1
             self._insert_drive(drive)
             windows.append((drive.start, drive.end, self._last_drive_id, True))
+            if drive.odometer_start is not None and drive.odometer_end is not None:
+                kms.append((drive.odometer_start, drive.odometer_end))
 
     def _insert_drive(self, drive: Drive) -> None:
         with self.conn.cursor() as cur:
@@ -487,10 +534,19 @@ class Importer:
         }
 
 
-def import_exports(dsn: str, vin: str, usable_kwh: float, paths: list[str]) -> dict[str, Any]:
+def import_exports(
+    dsn: str, vin: str, usable_kwh: float, paths: list[str], dry_run: bool = False
+) -> dict[str, Any]:
     importer = Importer(dsn, vin, usable_kwh)
     try:
         importer.prepare()
+        every: MergedExport = parse_files(paths)
+        reconciled = importer.reconcile(every.drives, paths)
+        _LOGGER.info("drive edges reconciled: %s", json.dumps(reconciled, default=str)[:800])
+        if dry_run:
+            importer.conn.rollback()
+            return {"ok": True, "dry_run": True, "reconciled": reconciled}
+        importer.conn.commit()
         fresh: list[str] = []
         for path in paths:
             sha = file_sha256(path)
@@ -499,9 +555,9 @@ def import_exports(dsn: str, vin: str, usable_kwh: float, paths: list[str]) -> d
                 continue
             fresh.append(path)
         if not fresh:
-            return {"ok": True, "duplicates": len(paths), **importer.summary()}
+            return {"ok": True, "duplicates": len(paths), "reconciled": reconciled, **importer.summary()}
 
-        merged: MergedExport = parse_files(fresh)
+        merged = every if len(fresh) == len(paths) else parse_files(fresh)
 
         importer.import_drives(merged.drives, importer.existing_windows("drives"))
         importer.import_charges(
@@ -520,6 +576,7 @@ def import_exports(dsn: str, vin: str, usable_kwh: float, paths: list[str]) -> d
                 "ok": True,
                 "duplicates": len(paths) - len(fresh),
                 "files_imported": len(fresh),
+                "reconciled": reconciled,
                 "vin": merged.vin or vin,
             }
         )
@@ -536,6 +593,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vin", default=os.environ.get("XPENG_VIN", ""))
     parser.add_argument(
         "--usable-kwh", default=os.environ.get("XPENG_USABLE_BATTERY_KWH", "87.5")
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the drive edges the export would move, roll them back, import nothing",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -554,7 +616,7 @@ def main(argv: list[str] | None = None) -> int:
         print("XPENGMATE_DATABASE_URL and XPENG_VIN are required", file=sys.stderr)
         return 2
     summary = import_exports(
-        args.database_url, args.vin, float(args.usable_kwh), paths
+        args.database_url, args.vin, float(args.usable_kwh), paths, args.dry_run
     )
     print(json.dumps(summary, indent=2, default=str))
     # A single line the service can find unambiguously in the log stream.

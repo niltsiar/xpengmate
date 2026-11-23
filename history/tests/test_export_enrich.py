@@ -1,4 +1,8 @@
+import os
+import tempfile
 import unittest
+import zipfile
+from datetime import datetime, timezone
 
 import export_enrich
 
@@ -27,6 +31,40 @@ class NearestSampleTest(unittest.TestCase):
             pairs([(1, 1000), (2, 1004), (3, 1009)], samples(999, 1005, 1010)),
             [(1, 999), (2, 1005), (3, 1010)],
         )
+
+
+def utc(seconds):
+    return datetime.fromtimestamp(seconds, timezone.utc).replace(tzinfo=None)
+
+
+def export_zip(directory, name, rows):
+    """A minimal export with (timer, odometer, soc, range) rows."""
+    path = os.path.join(directory, name)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "car_driving_operation_di.csv",
+            "timer,cdcu_totalodometer\n" + "".join(f"{t},{odo}\n" for t, odo, _soc, _rng in rows),
+        )
+        archive.writestr(
+            "car_driving_power_energy_di.csv",
+            "timer,ldcu_bms_soc_disp,ldcu_dstbatdisp_dynamic\n"
+            + "".join(f"{t},{soc},{rng}\n" for t, _odo, soc, rng in rows),
+        )
+    return path
+
+
+class SamplesAtTest(unittest.TestCase):
+    def test_each_moment_takes_its_nearest_sample_from_the_first_zip_that_has_one(self):
+        first_moment = utc(1000)
+        second_moment = utc(5000)
+        missing = utc(9000)
+        with tempfile.TemporaryDirectory() as directory:
+            older = export_zip(directory, "older.zip", [(999, 100.04, 80, 300.0), (1001, 100.1, 79, 299.0)])
+            newer = export_zip(directory, "newer.zip", [(1000, 555.0, 1, 1.0), (5002, 120.0, 70, 250.555)])
+
+            found = export_enrich.samples_at([older, newer], [second_moment, first_moment, missing])
+
+        self.assertEqual(found, {first_moment: (80, 100.0, 300.0), second_moment: (70, 120.0, 250.56)})
 
 
 if __name__ == "__main__":

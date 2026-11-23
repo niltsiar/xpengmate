@@ -66,9 +66,20 @@ CREATE TABLE IF NOT EXISTS xpengmate_drive_repairs (
     end_at      timestamp,
     estimated   boolean          NOT NULL,
     created_at  timestamp        NOT NULL,
+    confirmed_start_at timestamp,
+    confirmed_end_at   timestamp,
     UNIQUE (car_id, kind, km_from, km_to)
 )
 """
+
+#: Adds the columns a table from before them lacks (PostgreSQL only).
+ADD_CONFIRMED_COLUMNS = (
+    "ALTER TABLE xpengmate_drive_repairs ADD COLUMN IF NOT EXISTS confirmed_start_at timestamp,"
+    " ADD COLUMN IF NOT EXISTS confirmed_end_at timestamp"
+)
+
+#: The advisory lock this job and the export import take before they write drives.
+DRIVES_LOCK_KEY = 74_706_013
 
 _SUCCESSOR_QUERIES = (
     "SELECT start_date FROM drives"
@@ -591,6 +602,7 @@ def run(dsn: str, settings: dict[str, str], vin: str, dry_run: bool = False) -> 
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(%s)", (DRIVES_LOCK_KEY,))
             car_id = find_car(cursor, vin)
             if car_id is None:
                 _LOGGER.info("drive gap repair found no car: set XPENG_VIN")
