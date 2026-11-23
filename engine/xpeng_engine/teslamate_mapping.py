@@ -489,7 +489,6 @@ class Telemetry:
     data_ms: int = 0
     data_age_seconds: float | None = None
     mqtt_connected: bool = True
-    usable_kwh: float = 87.5
     car_version: str | None = None
     outside_temp_c: float | None = None
     #: False only when nothing has ever been received for this VIN (a fresh
@@ -595,8 +594,9 @@ def build_charge_state(
     """Tesla's ``charge_state``.
 
     ``charge_energy_added`` is the session energy the provider passes in: the
-    car's ``charge_capacity``, or a SoC-based estimate when the car has not sent
-    it. Without it TeslaMate's charging statistics all read nil.
+    car's ``charge_capacity``, or None when the car has not sent one in the
+    session. It is the energy at the car's inlet, which TeslaMate calls energy
+    used; the history job derives the energy added from the battery levels.
     """
     charge = charge_section(snapshot.raw)
     soc, range_miles = _battery(snapshot)
@@ -948,7 +948,6 @@ def snapshot_from_coordinator(coordinator: Any) -> Telemetry:
         data_age_seconds=silence,
         has_data=bool(raw) or last_epoch is not None,
         mqtt_connected=bool(poll.get("mqtt_connected", True)),
-        usable_kwh=float(getattr(coordinator, "usable_battery_kwh", 87.5) or 87.5),
         car_version=getattr(coordinator, "xos_version", None),
         outside_temp_c=as_float(weather.get("realtimeTemperature")),
     )

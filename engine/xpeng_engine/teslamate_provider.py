@@ -50,7 +50,6 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 from .teslamate_mapping import (
     Telemetry,
     as_float,
-    as_int,
     build_vehicle,
     charge_cable_attached,
     charge_section,
@@ -141,10 +140,9 @@ class _CarState:
     last_longitude: float | None = None
     charging: bool = False
     last_charge_evidence: float = 0.0
-    charge_start_soc: int | None = None
     charge_start_range_miles: float | None = None
     energy_added_kwh: float | None = None
-    session_capacity_kwh: float = 0.0
+    session_capacity_kwh: float | None = None
     range_added_miles: float | None = None
     seen_charge_session: bool = False
 
@@ -361,9 +359,9 @@ class TeslaMateProvider:
     def _effective_charging(self, snapshot: Telemetry, car: _CarState) -> bool:
         """Charging, with a grace period so a state-code blip does not end it.
 
-        Also tracks the session energy: the car's own ``charge_capacity`` when it
-        has sent one, else an estimate from the battery percentage against the
-        configured usable capacity.
+        Also tracks the session energy: the car's own ``charge_capacity`` (energy
+        at the car's inlet, highest value so far, 0 included), or None while the
+        car has not sent the field in the session.
         """
         now = snapshot.now_ms / 1000.0
         raw = snapshot.raw or {}
@@ -385,7 +383,6 @@ class TeslaMateProvider:
             car.charging = False
             return False
 
-        soc = as_int(dig(raw, "instant", "charge", "battery_soc"))
         range_km = as_float(
             dig(raw, "instant", "odometer", "avalible_driving_distance")
         )
@@ -393,26 +390,19 @@ class TeslaMateProvider:
         if not car.charging:
             car.charging = True
             car.seen_charge_session = True
-            car.charge_start_soc = soc
             car.charge_start_range_miles = range_miles
-            car.energy_added_kwh = 0.0
-            car.session_capacity_kwh = 0.0
+            car.energy_added_kwh = None
+            car.session_capacity_kwh = None
             car.range_added_miles = 0.0
         # The car's value grows through the session and reads 0 once the cable
         # is out, which can happen before the grace period ends.
         capacity = as_float(charge_section(raw).get("charge_capacity"))
-        if capacity is not None and capacity > car.session_capacity_kwh:
+        if capacity is not None and capacity >= (car.session_capacity_kwh or 0.0):
             car.session_capacity_kwh = capacity
-        if car.charge_start_soc is None and soc is not None:
-            # The first frame of the session may predate the SOC reading.
-            car.charge_start_soc = soc
         if car.charge_start_range_miles is None and range_miles is not None:
             car.charge_start_range_miles = range_miles
-        if car.session_capacity_kwh > 0:
+        if car.session_capacity_kwh is not None:
             car.energy_added_kwh = round(car.session_capacity_kwh, 2)
-        elif soc is not None and car.charge_start_soc is not None:
-            delta = (soc - car.charge_start_soc) / 100.0 * snapshot.usable_kwh
-            car.energy_added_kwh = round(max(0.0, delta), 2)
         if range_miles is not None and car.charge_start_range_miles is not None:
             car.range_added_miles = round(
                 max(0.0, range_miles - car.charge_start_range_miles), 1

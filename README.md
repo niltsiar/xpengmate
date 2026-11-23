@@ -317,8 +317,8 @@ Measured on the reference car (XPENG G6 RWD, VIN `…800783`):
 
 These follow from what XPENG exposes, not from how the fork is wired:
 
-* **Live charge energy** is estimated from battery percentage × usable capacity;
-  XPENG does not publish a session's kWh.
+* **Charge energy**: "used" is the car's own session energy at its inlet. "Added" is
+  estimated from the battery levels and the usable capacity by the history service.
 * **Outside temperature** without a configured sensor is the weather at the car,
   not an ambient sensor reading.
 * **Drive power** is `0` while driving (XPENG does not expose motor power to the

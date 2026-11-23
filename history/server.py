@@ -31,6 +31,7 @@ from typing import Any
 import psycopg
 
 import repair_drive_gaps
+import split_charge_energy
 from close_orphan_charges import close_orphans
 
 try:
@@ -218,6 +219,7 @@ class HistoryService:
         self._export_task: asyncio.Task[Any] | None = None
         self._orphan_task: asyncio.Task[Any] | None = None
         self._repair_task: asyncio.Task[Any] | None = None
+        self._usable_unset_logged = False
         self._config = read_json(CONFIG_PATH)
         self._session: "aiohttp.ClientSession | None" = None
 
@@ -260,13 +262,24 @@ class HistoryService:
             try:
                 await asyncio.to_thread(self._close_orphans)
             except Exception:  # noqa: BLE001 - the database may not be up yet
-                _LOGGER.warning("closing orphaned charging processes failed", exc_info=True)
+                _LOGGER.warning("orphan closer or charge energy split failed", exc_info=True)
             await asyncio.sleep(ORPHAN_CLOSE_INTERVAL)
 
     def _close_orphans(self) -> None:
         with psycopg.connect(DATABASE_URL, autocommit=True) as connection:
             with connection.cursor() as cursor:
                 close_orphans(cursor)
+            self._split_charge_energy(connection)
+
+    def _split_charge_energy(self, connection: Any) -> None:
+        settings = self.settings
+        usable_kwh = split_charge_energy.parse_usable_kwh(settings.get("usable_battery_kwh"))
+        if usable_kwh is None:
+            if not self._usable_unset_logged:
+                _LOGGER.info("charge energy split is off: set XPENG_USABLE_BATTERY_KWH")
+                self._usable_unset_logged = True
+            return
+        split_charge_energy.run(connection, str(settings.get("vin") or ""), usable_kwh)
 
     async def _repair_drive_gaps_forever(self, repair_settings: dict[str, str]) -> None:
         while True:

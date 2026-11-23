@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Charge session energy: the car's ``charge_capacity`` wins over the SoC estimate.
+"""Charge session energy: only the car's ``charge_capacity`` is sent, never a SoC estimate.
 
     python3 -m unittest engine.tests.test_session_energy -v
 """
@@ -21,7 +21,6 @@ from xpeng_engine.teslamate_provider import (
 )
 
 VIN = "L1NNSGHA3SB800783"
-USABLE_KWH = 87.5
 
 
 def charging_frame(soc: int, capacity: Any = None) -> dict[str, Any]:
@@ -62,18 +61,15 @@ class SessionEnergyTest(unittest.TestCase):
     def feed(self, raw: dict[str, Any]) -> float | None:
         """Deliver one frame and return the energy the provider reports."""
         self.now_ms += 10_000
-        snapshot = Telemetry(
-            vin=VIN, raw=raw, now_ms=self.now_ms, usable_kwh=USABLE_KWH
-        )
+        snapshot = Telemetry(vin=VIN, raw=raw, now_ms=self.now_ms)
         self.source.update([snapshot])
         prepared = self.provider._prepared()[0]
         energy, _ = self.provider._session_values(prepared)
         return energy
 
-    def test_car_value_replaces_the_soc_estimate(self) -> None:
+    def test_car_value_is_sent_rounded(self) -> None:
         self.feed(charging_frame(soc=40))
         energy = self.feed(charging_frame(soc=50, capacity=26.600000381469727))
-        # The SoC delta alone would give 10 % of 87.5 kWh = 8.75.
         self.assertEqual(energy, 26.6)
 
     def test_zero_reading_keeps_the_last_positive_value(self) -> None:
@@ -82,10 +78,16 @@ class SessionEnergyTest(unittest.TestCase):
         self.assertEqual(self.feed(charging_frame(soc=50, capacity=0)), 24.5)
         self.assertEqual(self.feed(charging_frame(soc=50)), 24.5)
 
-    def test_missing_value_falls_back_to_the_soc_delta(self) -> None:
-        self.feed(charging_frame(soc=40))
-        energy = self.feed(charging_frame(soc=50))
-        self.assertEqual(energy, 8.75)
+    def test_no_value_from_the_car_gives_none_whatever_the_soc_does(self) -> None:
+        self.assertIsNone(self.feed(charging_frame(soc=40)))
+        self.assertIsNone(self.feed(charging_frame(soc=50)))
+
+    def test_session_that_starts_at_zero_reports_zero_then_the_rising_value(self) -> None:
+        self.assertEqual(self.feed(charging_frame(soc=40, capacity=0)), 0.0)
+        self.assertEqual(self.feed(charging_frame(soc=40, capacity=0.1)), 0.1)
+        self.assertEqual(self.feed(charging_frame(soc=41, capacity=0.9)), 0.9)
+        # A lower reading (the 0 after unplug) keeps the highest value.
+        self.assertEqual(self.feed(charging_frame(soc=41, capacity=0)), 0.9)
 
     def test_new_session_does_not_inherit_the_previous_value(self) -> None:
         self.feed(charging_frame(soc=40))
