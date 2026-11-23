@@ -366,6 +366,30 @@ class RepairDriveGapsTest(unittest.TestCase):
         repairs = self.repair(TRIP, now=at(11, 19))
         self.assertEqual([(r["km_from"], r["km_to"]) for r in repairs], [(10486.996225, 10520.0)])
 
+    def parked_stop(self, next_start):
+        """A drive ends in P, the next live frame comes later; HA rises 1 km per 5 to 12 minutes."""
+        self.drive(1, at(11, 20), at(11, 20, 16, 0, 552), 29980.0, 29987.003)
+        self.drive(2, next_start, at(11, 20, 40), 29988.001, 29995.0)
+        records = [
+            (at(11, 19, 55), "29980"),
+            (at(11, 20, 10), "29987"),
+            (at(11, 20, 22, 30), "29988"),
+            *steps(at(11, 20, 22, 30), 29988, at(11, 20, 40), 29995),
+        ]
+        return self.repair(records, now=at(11, 23))
+
+    def test_start_after_a_short_stop_comes_from_the_gap_km_not_the_previous_drive_end(self):
+        repairs = self.parked_stop(at(11, 20, 22, 20, 10))
+        self.assertEqual([r["kind"] for r in repairs], ["extended_start"])
+        # 0.998 km at 90 km/h take 39.92 s.
+        expected = at(11, 20, 22, 20, 10) - timedelta(seconds=39.92)
+        self.assertAlmostEqual(repairs[0]["start_at"], expected, delta=timedelta(milliseconds=10))
+        self.assertEqual(self.row("drives", 2)["start_date"], repairs[0]["start_at"])
+
+    def test_start_estimated_from_the_gap_km_is_not_earlier_than_the_previous_drive_end(self):
+        repairs = self.parked_stop(at(11, 20, 16, 30))
+        self.assertEqual([r["start_at"] for r in repairs], [at(11, 20, 16, 0, 552)])
+
 
 class HomeAssistantPayloadTest(unittest.TestCase):
     def test_history_payloads_become_naive_utc_records(self):

@@ -364,7 +364,11 @@ def _repair_gap(
         return None
     if gap.after is not None:
         drive = gap.after
-        new_start = min(gap.before["end_date"] if gap.before else start, drive["start_date"])
+        if gap.before:
+            # Both edges are decimal drive km, so no whole-km lead; the car sat parked after the drive.
+            lead = timedelta(hours=(gap.upper - gap.lower) / LEAD_SPEED_KMH)
+            start = max(drive["start_date"] - lead, gap.before["end_date"])
+        new_start = min(start, drive["start_date"])
         charge = measure(new_start)
         position_id = _add_position(
             cursor, car_id, drive["id"], new_start, gap.lower, locate(new_start, True), charge
