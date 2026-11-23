@@ -567,10 +567,9 @@ def build_charge_state(
 ) -> dict[str, Any]:
     """Tesla's ``charge_state``.
 
-    ``charge_energy_added`` is the one value XPENG does not publish for the live
-    session (``chargeStatistics.usageElectricity`` describes the previous one),
-    so the provider tracks the session and passes the estimate in - without it
-    TeslaMate's charging statistics all read nil.
+    ``charge_energy_added`` is the session energy the provider passes in: the
+    car's ``charge_capacity``, or a SoC-based estimate when the car has not sent
+    it. Without it TeslaMate's charging statistics all read nil.
     """
     charge = charge_section(snapshot.raw)
     soc, range_miles = _battery(snapshot)

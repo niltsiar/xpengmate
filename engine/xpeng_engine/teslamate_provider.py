@@ -144,6 +144,7 @@ class _CarState:
     charge_start_soc: int | None = None
     charge_start_range_miles: float | None = None
     energy_added_kwh: float | None = None
+    session_capacity_kwh: float = 0.0
     range_added_miles: float | None = None
     seen_charge_session: bool = False
 
@@ -360,9 +361,9 @@ class TeslaMateProvider:
     def _effective_charging(self, snapshot: Telemetry, car: _CarState) -> bool:
         """Charging, with a grace period so a state-code blip does not end it.
 
-        Also feeds the session energy estimate: XPENG reports charger power but
-        not energy added for the current session, so the provider integrates it
-        from the battery percentage against the configured usable capacity.
+        Also tracks the session energy: the car's own ``charge_capacity`` when it
+        has sent one, else an estimate from the battery percentage against the
+        configured usable capacity.
         """
         now = snapshot.now_ms / 1000.0
         raw = snapshot.raw or {}
@@ -395,13 +396,21 @@ class TeslaMateProvider:
             car.charge_start_soc = soc
             car.charge_start_range_miles = range_miles
             car.energy_added_kwh = 0.0
+            car.session_capacity_kwh = 0.0
             car.range_added_miles = 0.0
+        # The car's value grows through the session and reads 0 once the cable
+        # is out, which can happen before the grace period ends.
+        capacity = as_float(charge_section(raw).get("charge_capacity"))
+        if capacity is not None and capacity > car.session_capacity_kwh:
+            car.session_capacity_kwh = capacity
         if car.charge_start_soc is None and soc is not None:
             # The first frame of the session may predate the SOC reading.
             car.charge_start_soc = soc
         if car.charge_start_range_miles is None and range_miles is not None:
             car.charge_start_range_miles = range_miles
-        if soc is not None and car.charge_start_soc is not None:
+        if car.session_capacity_kwh > 0:
+            car.energy_added_kwh = round(car.session_capacity_kwh, 2)
+        elif soc is not None and car.charge_start_soc is not None:
             delta = (soc - car.charge_start_soc) / 100.0 * snapshot.usable_kwh
             car.energy_added_kwh = round(max(0.0, delta), 2)
         if range_miles is not None and car.charge_start_range_miles is not None:
