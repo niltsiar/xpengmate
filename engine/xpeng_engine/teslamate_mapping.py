@@ -28,6 +28,7 @@ Pure: no Home Assistant import, so it is testable with plain ``python3``.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -170,6 +171,26 @@ CHARGE_INTEGER_FIELDS = (
 #: AC supply voltage per phase never exceeds about 253 V.
 _MAX_AC_VOLTAGE = 270.0
 
+#: On 3-phase AC the car reports the line-to-line voltage, so P / (V * I) is
+#: sqrt(3) = 1.73. The charger power is an integer kW, which widens the band.
+_THREE_PHASE_RATIO = (1.4, 2.1)
+
+
+def is_three_phase_ac(
+    power_kw: float | None, voltage: float | None, current: float | None
+) -> bool:
+    """True for a 3-phase AC charge above the AC phase voltage.
+
+    Above ``_MAX_AC_VOLTAGE`` a sample is either DC (P = V * I, ratio 1) or
+    3-phase AC at line-to-line voltage (P = sqrt(3) * V * I, ratio 1.73).
+    """
+    if power_kw is None or voltage is None or current is None:
+        return False
+    if power_kw <= 0 or current <= 0 or voltage <= _MAX_AC_VOLTAGE:
+        return False
+    low, high = _THREE_PHASE_RATIO
+    return low <= power_kw * 1000 / (voltage * current) <= high
+
 
 def derive_ac_phases(
     charge_state: dict[str, Any],
@@ -180,9 +201,11 @@ def derive_ac_phases(
     """Phase count of an AC charge, from P = phases * V * I.
 
     The XPENG provider never reports ``charger_phases``, and the dashboards
-    label a charge DC when it is missing. Returns None for DC, for a voltage
-    above any AC supply (a DC ramp-up or taper can fall below the fast-charger
-    power threshold) or for a sample without a usable power, voltage and current.
+    label a charge DC when it is missing. Up to ``_MAX_AC_VOLTAGE`` the phase
+    count is the rounded P / (V * I). Above it the sample is 3-phase AC when
+    ``is_three_phase_ac`` says so, else DC. Returns None for DC (a DC ramp-up or
+    taper can fall below the fast-charger power threshold) or for a sample
+    without a usable power, voltage and current.
     """
     if as_bool(charge_state.get("fast_charger_present")):
         return None
@@ -191,7 +214,7 @@ def derive_ac_phases(
     if power_kw <= 0 or voltage < 100 or current <= 0:
         return None
     if voltage > _MAX_AC_VOLTAGE:
-        return None
+        return 3 if is_three_phase_ac(power_kw, voltage, current) else None
     return max(1, min(3, round(power_kw * 1000 / (voltage * current))))
 
 
@@ -203,7 +226,9 @@ def normalise_charge_state(charge_state: dict[str, Any]) -> bool:
     ``charger_phases`` is removed because ``validate_number(:charger_phases,
     greater_than: 0)`` would otherwise reject the entire sample. A missing
     ``charger_phases`` on an AC charge is derived from power, voltage and
-    current.
+    current. A 3-phase AC sample also gets its line-to-line voltage replaced by
+    the per-phase value (V / sqrt(3)), the voltage TeslaMate multiplies by the
+    phase count to get the energy used.
 
     Whole floats count as floats here - ``0.0`` is numerically equal to ``0``
     but Ecto still refuses it - so every non-``int`` value is rewritten.
@@ -234,6 +259,8 @@ def normalise_charge_state(charge_state: dict[str, Any]) -> bool:
         phases = derive_ac_phases(charge_state, power_kw, voltage, current)
         if phases is not None:
             charge_state["charger_phases"] = phases
+            if phases == 3 and voltage is not None and voltage > _MAX_AC_VOLTAGE:
+                charge_state["charger_voltage"] = int(round(voltage / math.sqrt(3)))
             changed = True
     return changed
 
@@ -581,10 +608,14 @@ def build_charge_state(
         # Charging and 15 mid-session (measured on a G6), and ending a TeslaMate
         # session on that blip would split one charge into two.
         tesla_state = TESLA_CHARGING
-    fast = bool(power is not None and power >= DC_POWER_THRESHOLD_KW)
-    limit = as_int(charge.get("max_range_charge"))
     current = as_float(dig(snapshot.raw, "interval", "charge", "electricity"))
     voltage = as_float(dig(snapshot.raw, "interval", "charge", "voltage"))
+    fast = bool(
+        power is not None
+        and power >= DC_POWER_THRESHOLD_KW
+        and not is_three_phase_ac(power, voltage, current)
+    )
+    limit = as_int(charge.get("max_range_charge"))
     remaining_min = as_float(charge.get("time_to_complete_charge_min"))
     timestamp = _timestamp_ms(snapshot)
     charge_state = {

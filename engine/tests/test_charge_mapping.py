@@ -201,6 +201,38 @@ class DeriveChargerPhasesTest(unittest.TestCase):
         normalise_charge_state(charge)
         self.assertEqual(charge["charger_phases"], 3)
 
+    def test_line_to_line_three_phase_sample_gets_three_phases_and_per_phase_voltage(self) -> None:
+        # A real 22 kW post with the car limited to 13 A: 1.732 * 405 * 13 = 9.1 kW.
+        charge = self.ac_sample(9, 405, 13)
+        self.assertTrue(normalise_charge_state(charge))
+        self.assertEqual(charge["charger_phases"], 3)
+        self.assertEqual(charge["charger_voltage"], 234)
+        self.assertIsInstance(charge["charger_voltage"], int)
+        # The rewritten sample is a fixed point: its voltage is not divided twice.
+        self.assertFalse(normalise_charge_state(charge))
+        self.assertEqual(charge["charger_voltage"], 234)
+
+    def test_dc_sample_above_the_ac_voltage_keeps_its_voltage_and_gets_no_phases(self) -> None:
+        for power, voltage, current in ((78.0, 650.0, 120.0), (12.0, 430.0, 27.9)):
+            with self.subTest(power=power):
+                charge = self.ac_sample(power, voltage, current)
+                normalise_charge_state(charge)
+                self.assertIsNone(charge["charger_phases"])
+                self.assertEqual(charge["charger_voltage"], round(voltage))
+
+    def test_ratio_outside_the_three_phase_band_stays_dc(self) -> None:
+        for power in (6.0, 14.0):
+            with self.subTest(power=power):
+                charge = self.ac_sample(power, 400.0, 13.0)
+                normalise_charge_state(charge)
+                self.assertIsNone(charge["charger_phases"])
+                self.assertEqual(charge["charger_voltage"], 400)
+
+    def test_single_phase_voltage_is_not_rewritten(self) -> None:
+        charge = self.ac_sample(3.7, 231.3, 16.0)
+        normalise_charge_state(charge)
+        self.assertEqual(charge["charger_voltage"], 231)
+
     def test_native_mapping_derives_phases(self) -> None:
         raw = {
             "instant": {**CHARGING_RAW["instant"]},
@@ -224,6 +256,33 @@ class BuildChargeStateTest(unittest.TestCase):
         self.assertEqual(charge["battery_level"], 58)
         # The values TeslaMate stores as :decimal keep their precision.
         self.assertNotIsInstance(charge["charge_energy_added"], int)
+
+    @staticmethod
+    def charging_raw(power: float, voltage: float, current: float) -> dict[str, Any]:
+        return {
+            "instant": {**CHARGING_RAW["instant"]},
+            "interval": {"charge": {"power": power, "voltage": voltage, "electricity": current}},
+        }
+
+    def test_three_phase_ac_at_22_kw_is_not_a_fast_charger(self) -> None:
+        # 1.732 * 400 V * 32 A = 22.2 kW
+        charge = build_charge_state(Telemetry(vin=VIN, raw=self.charging_raw(22, 400, 32)))
+        self.assertFalse(charge["fast_charger_present"])
+        self.assertIsNone(charge["fast_charger_type"])
+        self.assertEqual(charge["charger_phases"], 3)
+        self.assertEqual(charge["charger_voltage"], 231)
+
+    def test_real_three_phase_sample_gets_per_phase_voltage(self) -> None:
+        charge = build_charge_state(Telemetry(vin=VIN, raw=self.charging_raw(9, 405, 13)))
+        self.assertEqual((charge["charger_phases"], charge["charger_voltage"]), (3, 234))
+        self.assertFalse(charge["fast_charger_present"])
+
+    def test_dc_charge_stays_fast_and_keeps_its_voltage(self) -> None:
+        charge = build_charge_state(Telemetry(vin=VIN, raw=self.charging_raw(78, 650, 120)))
+        self.assertTrue(charge["fast_charger_present"])
+        self.assertEqual(charge["fast_charger_type"], "CCS")
+        self.assertIsNone(charge["charger_phases"])
+        self.assertEqual(charge["charger_voltage"], 650)
 
     def test_parked_zero_power_is_an_int(self) -> None:
         raw = {

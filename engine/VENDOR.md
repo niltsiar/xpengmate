@@ -30,7 +30,8 @@ Only three things differ from upstream:
   because there is no Home Assistant coordinator to wrap.
 
 * `teslamate_mapping.py` is **modified**. `normalise_charge_state` rounds the integer
-  charge fields and derives the AC `charger_phases` (none above 270 V, which is DC).
+  charge fields and derives the AC `charger_phases`. Above 270 V a sample is 3-phase AC only when P / (V * I)
+  is between 1.4 and 2.1; then the voltage becomes the per-phase value. Any other sample is DC.
   A refresh must re-apply this change.
 
 Everything else in `xpeng_engine/` (`config.py`, `state.py`, `api_session.py`,
