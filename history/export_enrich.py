@@ -137,6 +137,20 @@ def _clean(sample: dict) -> tuple[int | None, float | None, float | None]:
     )
 
 
+def nearest_samples(
+    positions: Iterable[tuple[int, int]], samples: Iterator[tuple[int, dict]]
+) -> Iterator[tuple[int, tuple[int, dict]]]:
+    """Pair each (id, unix seconds) position, in time order, with the closest sample within tolerance."""
+    before: tuple[int, dict] | None = None
+    after = next(samples, None)
+    for position_id, epoch_seconds in positions:
+        while after is not None and after[0] <= epoch_seconds:
+            before, after = after, next(samples, None)
+        close = [s for s in (before, after) if s is not None and abs(s[0] - epoch_seconds) <= TOLERANCE_SECONDS]
+        if close:
+            yield position_id, min(close, key=lambda sample: abs(sample[0] - epoch_seconds))
+
+
 def resolve_zip(path: str) -> str:
     """Accept a zip file or a directory holding export zips (newest wins).
 
@@ -173,22 +187,9 @@ def enrich(store: Any, zip_path: str) -> int:
         _LOGGER.warning("no positions to enrich")
         return 0
 
-    samples = iter_samples(zip_path)
-    pending = next(samples, None)
-    previous: tuple[int, dict] | None = None
     updates: list[tuple[int, int, float | None, float | None, float | None]] = []
     matched = 0
-    for position_id, epoch_seconds in positions:
-        while pending is not None and pending[0] < epoch_seconds - TOLERANCE_SECONDS:
-            previous = pending
-            pending = next(samples, None)
-        chosen = None
-        if pending is not None and abs(pending[0] - epoch_seconds) <= TOLERANCE_SECONDS:
-            chosen = pending
-        elif previous is not None and abs(previous[0] - epoch_seconds) <= TOLERANCE_SECONDS:
-            chosen = previous
-        if chosen is None:
-            continue
+    for position_id, chosen in nearest_samples(positions, iter_samples(zip_path)):
         soc, odometer, range_km = _clean(chosen[1])
         if soc is None and odometer is None and range_km is None:
             continue
