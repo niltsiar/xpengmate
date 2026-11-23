@@ -156,7 +156,7 @@ def resolve_zip(path: str) -> str:
 
 
 def enrich(store: Any, zip_path: str) -> int:
-    """Join the export onto this car's positions, then re-derive drive ranges."""
+    """Join the export onto this car's positions, then fill missing drive ranges."""
     zip_path = resolve_zip(zip_path)
     with store.conn.cursor() as cur:
         cur.execute(
@@ -218,17 +218,18 @@ def enrich(store: Any, zip_path: str) -> int:
             ],
         )
         # Drive-level range figures, from the enriched positions. TeslaMate's
-        # efficiency dashboards use (start_range - end_range), and a live logger
-        # fills these when it closes a drive.
+        # efficiency dashboards use (start_range - end_range). Only empty fields
+        # are filled: a live drive's first position can come minutes after the
+        # car started moving, so its odometer and range are not the drive start.
         cur.execute(
             """
             UPDATE drives d SET
-                start_ideal_range_km = first.ideal_battery_range_km,
-                end_ideal_range_km   = last.ideal_battery_range_km,
-                start_rated_range_km = first.ideal_battery_range_km,
-                end_rated_range_km   = last.ideal_battery_range_km,
-                start_km = COALESCE(first.odometer, d.start_km),
-                end_km   = COALESCE(last.odometer, d.end_km)
+                start_ideal_range_km = COALESCE(d.start_ideal_range_km, first.ideal_battery_range_km),
+                end_ideal_range_km   = COALESCE(d.end_ideal_range_km, last.ideal_battery_range_km),
+                start_rated_range_km = COALESCE(d.start_rated_range_km, first.ideal_battery_range_km),
+                end_rated_range_km   = COALESCE(d.end_rated_range_km, last.ideal_battery_range_km),
+                start_km = COALESCE(d.start_km, first.odometer),
+                end_km   = COALESCE(d.end_km, last.odometer)
             FROM (
                 SELECT DISTINCT ON (drive_id)
                     drive_id, ideal_battery_range_km, odometer
