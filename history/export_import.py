@@ -113,6 +113,10 @@ class Importer:
     # -- schema / bookkeeping ---------------------------------
 
     def prepare(self) -> None:
+        # A session lock, so it outlasts the per-row commits; closing the connection releases it.
+        # It comes before the DDL: the repair job takes this lock before it touches the same tables.
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(%s)", (repair_drive_gaps.DRIVES_LOCK_KEY,))
         self.store.prepare()
         with self.conn.cursor() as cur:
             cur.execute(SCHEMA)
@@ -120,9 +124,6 @@ class Importer:
             cur.execute(repair_drive_gaps.ADD_CONFIRMED_COLUMNS)
             cur.execute(export_enrich.DRIVE_ENERGY_SCHEMA)
         self.conn.commit()
-        # A session lock, so it outlasts the per-row commits; closing the connection releases it.
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_lock(%s)", (repair_drive_gaps.DRIVES_LOCK_KEY,))
 
     def seen(self, sha256: str) -> bool:
         with self.conn.cursor() as cur:
