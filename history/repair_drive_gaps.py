@@ -12,9 +12,10 @@ the kilometres of an episode that no drive covers are a gap:
 
 The dates of a repaired part are estimates, because the odometer reports only
 every few minutes, until the export import confirms them in the repair row
-(``confirmed_start_at``, ``confirmed_end_at``). A moved drive end and each new position take the range and
-battery level in effect at their date from the optional HA sensors, else NULL;
-the old value of a moved end describes another moment. Each repair is a row in
+(``confirmed_start_at``, ``confirmed_end_at``). A moved drive end and each new
+position take the range and battery level in effect at their date from the
+optional HA sensors, else NULL; the old value of a moved end describes another
+moment. Each repair is a row in
 ``xpengmate_drive_repairs``, so a rerun finds nothing new.
 
 Open drives with a later drive or charging process are closed first, from their
