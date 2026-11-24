@@ -248,11 +248,11 @@ already covered — the card says so.
 
 ## Requesting the XPENG export from the settings page
 
-The *Request the XPENG export* card on `/xpengmate` asks XPENG for the
-30-day data export itself. Enter the XPENG account email and password and
-click the button. The `dataact` service logs in to the XPENG Data Act portal,
-requests the export, waits until it is ready, downloads the zip and uploads it
-through the import path above. The card shows the current step.
+The *Request from XPENG* section of the export card on `/xpengmate` asks
+XPENG for the 30-day data export itself. Enter the XPENG account email and
+password and click the button. The `dataact` service logs in to the XPENG Data
+Act portal, requests the export, waits until it is ready, downloads the zip and
+uploads it through the import path above. The section shows the current step.
 
 Requirements:
 
@@ -260,8 +260,9 @@ Requirements:
 * The slider solver image (`ghcr.io/xpengtoolkit/xpeng-slider-solver`), which
   the compose profile starts beside `dataact`.
 * HTTPS in front of the app, for example a reverse proxy that sets
-  `X-Forwarded-Proto`. The button refuses plain HTTP so the password never
-  crosses the network in clear.
+  `X-Forwarded-Proto`. The form appears only when you open the page over
+  HTTPS, so the password never crosses the network in clear. Over plain HTTP
+  the page shows "Open this page over HTTPS to request the export."
 
 Enable it in `.env`, then start the stack with `COMPOSE_PROFILES=dataact` or
 `docker compose --profile dataact up -d`:
@@ -273,13 +274,15 @@ SOLVER_TOKEN=...                       # openssl rand -hex 32
 XPENGMATE_DATAACT_URL=http://dataact:8300
 ```
 
-Without `XPENGMATE_DATAACT_URL` the card is hidden and nothing else changes.
+Without `XPENGMATE_DATAACT_URL` the section is hidden.
 
 * The service never stores the password, the session or the download link.
   It also keeps them out of its logs.
 * After a failed login the service refuses a new request for 15 minutes.
-* If the upload to history fails, the service keeps the zip. The next click
-  uploads that zip first, without a new login.
+* If the upload to history fails, the service keeps the zip. For example,
+  the card says "history is still busy; the zip is kept". The next request
+  uploads that zip first, before any login and even during the 15-minute
+  cooldown. The form still asks for the password, but no login happens.
 
 ## Filling TeslaMate's derived columns
 
@@ -373,6 +376,7 @@ grafana/           TeslaMate's dashboards, rebranded, plus the XPENG hero image
 engine/            XPENG engine: provider relay, native cloud client, HA source,
                    settings API; Tesla-compatible provider on :8201
 history/           EVConduit/export import, derived-column backfill, freshness API
+dataact/           optional export request service (compose profile `dataact`)
 docs/              architecture, screenshots
 scripts/           deploy + smoke-test helpers
 docker-compose.yml the whole stack

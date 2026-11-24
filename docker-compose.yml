@@ -29,8 +29,8 @@ services:
       - XPENGMATE_ADMIN_TOKEN=${XPENG_PROVIDER_TOKEN:?set XPENG_PROVIDER_TOKEN in .env}
       - XPENGMATE_ENGINE_ADMIN_URL=http://engine:8202
       - XPENGMATE_HISTORY_URL=http://history:8100
-      # The export request card appears only when the dataact profile is enabled
-      # and both are set.
+      # The export request card shows when XPENGMATE_DATAACT_URL is set; its
+      # form appears only over HTTPS.
       - XPENGMATE_DATAACT_URL=${XPENGMATE_DATAACT_URL:-}
       - XPENGMATE_DATAACT_TOKEN=${XPENGMATE_DATAACT_TOKEN:-}
       # Distributed node, only so `docker exec ... bin/teslamate rpc` can drive
@@ -180,7 +180,7 @@ services:
     build: ./dataact
     image: xpengmate-dataact:local
     profiles: [dataact]
-    restart: unless-stopped
+    restart: always
     init: true
     cap_drop:
       - ALL
@@ -211,7 +211,7 @@ services:
   dataact-solver:
     image: ghcr.io/xpengtoolkit/xpeng-slider-solver:0.1.2@sha256:2e02ca5f7beb5c497894f01ac61be662103b5450aa0845fcec02f86357ab2a12
     profiles: [dataact]
-    restart: unless-stopped
+    restart: always
     cap_drop:
       - ALL
     security_opt:

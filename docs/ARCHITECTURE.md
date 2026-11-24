@@ -125,7 +125,7 @@ fabricating a latitude and longitude. Everything else keeps upstream's shape.
 
 ## The settings API and the history service
 
-`/xpengmate` in the app is backed by two local services:
+`/xpengmate` in the app is backed by two local services, plus an optional third:
 
 * the **engine settings API** (port 8202, compose network only, provider token):
   reads status and the (secret-free) configuration, writes the runtime source
@@ -134,7 +134,12 @@ fabricating a latitude and longitude. Everything else keeps upstream's shape.
 * the **history service** (port 8100): stores the EVConduit source
   configuration, runs the importer as a subprocess on request, and answers
   freshness questions from the database (`counts`, newest row per table, lag to
-  the source). It keeps its configuration and log on its own volume, mode 0600.
+  the source). It keeps its configuration and log on its own volume, mode 0600;
+* the optional **dataact service** (port 8300, compose network only, compose
+  profile `dataact`, its own token): logs in to the XPENG Data Act portal with
+  the owner's account, requests the 30-day export, downloads the zip and
+  uploads it to the history service. It solves the login slider through a
+  separate solver container and never stores the password.
 
 ## Scheduled sync, export enrichment and the simulated live test
 

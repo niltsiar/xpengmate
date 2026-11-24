@@ -53,11 +53,25 @@ if [[ -n "$TOKEN" ]]; then
 fi
 
 say "export request service"
-dataact_id="$(docker ps -q --filter label=com.docker.compose.service=dataact 2>/dev/null | head -n1 || true)"
+compose_id() { docker ps -q --filter "label=com.docker.compose.service=$1" 2>/dev/null | head -n1 || true; }
+dataact_id="$(compose_id dataact)"
+app_id="$(compose_id xpengmate)"
+dataact_url=""
+if [[ -n "$app_id" ]]; then
+  dataact_url="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$app_id" \
+    | sed -n 's/^XPENGMATE_DATAACT_URL=//p')"
+fi
 if [[ -n "$dataact_id" ]]; then
-  dstate="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$dataact_id")"
+  dstate=""
+  for _ in $(seq 30); do
+    dstate="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$dataact_id")"
+    [[ "$dstate" == "starting" ]] || break
+    sleep 2
+  done
   [[ "$dstate" == "healthy" ]] || fail "dataact health is $dstate"
   ok "dataact healthy"
+elif [[ -n "$dataact_url" ]]; then
+  fail "the app has XPENGMATE_DATAACT_URL but no dataact container runs; start the stack with COMPOSE_PROFILES=dataact"
 else
   echo "   (dataact not enabled)"
 fi
