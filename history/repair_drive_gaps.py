@@ -599,10 +599,11 @@ def find_car(cursor: Any, vin: str) -> int | None:
 def run(dsn: str, settings: dict[str, str], vin: str, dry_run: bool = False) -> list[dict[str, Any]]:
     """One repair pass in one transaction; a dry run rolls it back."""
     fetch_odometer, fetch_location, fetch_range, fetch_battery = ha_fetchers(settings)
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(%s)", (DRIVES_LOCK_KEY,))
+            # After the lock, which can wait for a whole export import.
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             car_id = find_car(cursor, vin)
             if car_id is None:
                 _LOGGER.info("drive gap repair found no car: set XPENG_VIN")
