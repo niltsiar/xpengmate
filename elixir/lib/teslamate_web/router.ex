@@ -43,7 +43,8 @@ defmodule TeslaMateWeb.Router do
       live "/sign_in", SignInLive.Index
       live "/settings", SettingsLive.Index
       live "/xpengmate", XpengMateLive.Index
-    post "/xpengmate/exports", XpengMateController, :upload_exports
+      post "/xpengmate/exports", XpengMateController, :upload_exports
+      post "/xpengmate/export-request", XpengMateController, :request_export
       live "/geo-fences", GeoFenceLive.Index
       live "/geo-fences/new", GeoFenceLive.Form
       live "/geo-fences/:id/edit", GeoFenceLive.Form

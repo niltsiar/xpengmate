@@ -22,6 +22,7 @@ config :logger, :console,
 
 config :phoenix,
   json_library: Jason,
+  filter_parameters: ["password", "email"],
   static_compressors: [
     PhoenixBakery.Gzip,
     PhoenixBakery.Brotli,

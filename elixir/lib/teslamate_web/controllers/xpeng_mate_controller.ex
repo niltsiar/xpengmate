@@ -1,6 +1,7 @@
 defmodule TeslaMateWeb.XpengMateController do
   @moduledoc """
-  Plain multipart upload for XPENG data-export zips.
+  Plain multipart upload for XPENG data-export zips, and the form that asks the
+  dataact service to request a new export from XPENG.
 
   The LiveView file input proved unreliable for large, multi-file selections
   (the first entry of a multi-select never reached the server), so the export
@@ -58,6 +59,68 @@ defmodule TeslaMateWeb.XpengMateController do
         end
     end
   end
+
+  def request_export(conn, params) do
+    email = params |> text_param("email") |> String.trim()
+    password = text_param(params, "password")
+
+    cond do
+      Client.dataact_url() == nil ->
+        redirect_with(conn, :error, gettext("Requesting the export is not configured."))
+
+      not over_https?(conn) ->
+        redirect_with(
+          conn,
+          :error,
+          gettext(
+            "Open this page over HTTPS to request the export: the password must not cross the network in clear."
+          )
+        )
+
+      email == "" or password == "" ->
+        redirect_with(
+          conn,
+          :error,
+          gettext("Enter the email and the password of the XPENG account.")
+        )
+
+      true ->
+        case Client.request_export(email, password) do
+          {:ok, _} ->
+            redirect_with(
+              conn,
+              :info,
+              gettext(
+                "Export requested. The job takes a few minutes; this page shows its progress."
+              )
+            )
+
+          {:error, reason} ->
+            Logger.info("XpengMate export request refused: #{reason}")
+            redirect_with(conn, :error, request_error(reason))
+        end
+    end
+  end
+
+  # The app sits behind a TLS proxy; a direct request to the app port is plain HTTP.
+  defp over_https?(conn) do
+    conn.scheme == :https or get_req_header(conn, "x-forwarded-proto") == ["https"]
+  end
+
+  defp text_param(params, key) do
+    case Map.get(params, key) do
+      value when is_binary(value) -> value
+      _ -> ""
+    end
+  end
+
+  defp request_error(:running), do: gettext("An export request is already running.")
+
+  defp request_error(:cooldown),
+    do: gettext("A recent XPENG login failed. Wait 15 minutes, then try again.")
+
+  defp request_error(:unreachable), do: gettext("The export request service is unreachable.")
+  defp request_error(_), do: gettext("The export request service refused the request.")
 
   defp redirect_with(conn, kind, message) do
     conn

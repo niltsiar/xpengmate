@@ -4,7 +4,7 @@ defmodule TeslaMateWeb.XpengMateLive.Index do
   uses, the XPENG credentials when it authenticates itself, and the EVConduit
   history feed with how old the imported data is.
 
-  Everything here talks to the two local services over the compose network; no
+  Everything here talks to the local services over the compose network; no
   secret is ever rendered back - the engine reports only whether one is set.
   """
 
@@ -30,6 +30,8 @@ defmodule TeslaMateWeb.XpengMateLive.Index do
         engine: nil,
         history: nil,
         exports: nil,
+        dataact: nil,
+        refresh_timer: nil,
         test_result: nil,
         active_section: "source"
       )
@@ -42,7 +44,7 @@ defmodule TeslaMateWeb.XpengMateLive.Index do
       |> allow_upload(:tenant, accept: :any, max_entries: 1, max_file_size: 2_000_000)
       |> allow_upload(:tokens, accept: :any, max_entries: 1, max_file_size: 2_000_000)
 
-    # Fetched for the static render too: both services are on the compose
+    # Fetched for the static render too: the services are on the compose
     # network, and a settings page that paints its status in the first frame is
     # worth a few milliseconds of render time.
     {:ok, assign_status(socket)}
@@ -55,23 +57,25 @@ defmodule TeslaMateWeb.XpengMateLive.Index do
     {:noreply, assign_status(socket)}
   end
 
-  @impl true
-  def handle_event("refresh", _params, socket) do
-    {:noreply, assign_status(socket)}
-  end
-
-  # The two services are on the compose network, so these calls are fast. Doing
+  # The services are on the compose network, so these calls are fast. Doing
   # them in the LiveView process (rather than start_async) keeps the first
   # rendered frame complete instead of showing a placeholder that fills in.
   defp assign_status(socket) do
     engine = fetch_engine()
     history = fetch_history()
     exports = fetch_exports()
+    dataact = fetch_dataact()
 
     socket
-    |> assign(loading: false, engine: engine, history: history, exports: exports)
+    |> assign(
+      loading: false,
+      engine: engine,
+      history: history,
+      exports: exports,
+      dataact: dataact
+    )
     |> maybe_hydrate()
-    |> schedule_refresh(history, exports)
+    |> schedule_refresh(history, exports, dataact)
   end
 
   # First paint hydrates the forms; after a save the persisted values must win
@@ -80,20 +84,31 @@ defmodule TeslaMateWeb.XpengMateLive.Index do
   defp maybe_hydrate(%{assigns: %{pending_save: true}} = socket), do: hydrate_forms(socket)
   defp maybe_hydrate(socket), do: socket
 
-  defp schedule_refresh(socket, history, exports) do
+  # One poll chain: a manual refresh or a save reload while the timer is pending
+  # must not start a second one.
+  defp schedule_refresh(socket, history, exports, dataact) do
     history_running = match?(%{"running" => true}, history)
     exports_running = match?(%{"running" => true}, exports)
+    dataact_running = match?(%{"state" => "running"}, dataact)
 
-    if history_running or exports_running do
-      Process.send_after(self(), :reload, 5_000)
+    if (history_running or exports_running or dataact_running) and
+         not timer_pending?(socket.assigns.refresh_timer) do
+      assign(socket, refresh_timer: Process.send_after(self(), :reload, 5_000))
+    else
+      socket
     end
+  end
 
-    socket
+  defp timer_pending?(nil), do: false
+  defp timer_pending?(timer), do: Process.read_timer(timer) != false
+
+  @impl true
+  def handle_event("refresh", _params, socket) do
+    {:noreply, assign_status(socket)}
   end
 
   # -- source ------------------------------------------------
 
-  @impl true
   def handle_event("validate_source", %{"source" => params}, socket) do
     {:noreply, assign(socket, source_form: to_form(params, as: :source))}
   end
@@ -275,6 +290,15 @@ defmodule TeslaMateWeb.XpengMateLive.Index do
   defp fetch_exports do
     case Client.exports_status() do
       {:ok, status} -> status
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # nil when the export request is not configured: the page hides the form.
+  defp fetch_dataact do
+    case Client.dataact_status() do
+      {:ok, status} -> status
+      {:error, :not_configured} -> nil
       {:error, reason} -> {:error, reason}
     end
   end

@@ -1,9 +1,10 @@
 defmodule TeslaMate.XpengMate.Client do
   @moduledoc """
-  The two local services behind the XpengMate settings page.
+  The local services behind the XpengMate settings page.
 
-  Both live on the compose network and authenticate with the same provider
-  token xpengmate already uses. Neither is reachable from outside the stack.
+  All live on the compose network. The engine and history authenticate with the
+  provider token xpengmate already uses; dataact, which requests the XPENG data
+  export, has its own token. None is reachable from outside the stack.
   """
 
   require Logger
@@ -14,6 +15,16 @@ defmodule TeslaMate.XpengMate.Client do
   def engine_url, do: System.get_env("XPENGMATE_ENGINE_ADMIN_URL", @engine_default)
   def history_url, do: System.get_env("XPENGMATE_HISTORY_URL", @history_default)
   def token, do: System.get_env("XPENGMATE_ADMIN_TOKEN", "")
+
+  @doc "The export request service. Unset means the feature is off."
+  def dataact_url do
+    case System.get_env("XPENGMATE_DATAACT_URL") do
+      url when url in [nil, ""] -> nil
+      url -> url
+    end
+  end
+
+  def dataact_token, do: System.get_env("XPENGMATE_DATAACT_TOKEN", "")
 
   # -- engine -------------------------------------------------
 
@@ -91,12 +102,40 @@ defmodule TeslaMate.XpengMate.Client do
     end
   end
 
+  # -- dataact ------------------------------------------------
+
+  @doc """
+  Start the export request job with the XPENG account of the car owner.
+
+  The two 409 cases share a status, so they are told apart by the fixed texts
+  of dataact/job.mjs.
+  """
+  def request_export(email, password) do
+    case dataact(:post, "/request", %{"email" => email, "password" => password}) do
+      {:ok, status} -> {:ok, status}
+      {:error, :not_configured} -> {:error, :not_configured}
+      {:error, "an export request is already running"} -> {:error, :running}
+      {:error, "a login failed" <> _} -> {:error, :cooldown}
+      {:error, "service unreachable"} -> {:error, :unreachable}
+      {:error, _} -> {:error, :rejected}
+    end
+  end
+
+  def dataact_status, do: dataact(:get, "/status", nil)
+
+  defp dataact(method, path, body) do
+    case dataact_url() do
+      nil -> {:error, :not_configured}
+      url -> request(method, url <> path, body, dataact_token())
+    end
+  end
+
   # -- transport ----------------------------------------------
 
-  defp client do
+  defp client(token) do
     Tesla.client(
       [
-        {Tesla.Middleware.Headers, [{"authorization", "Bearer " <> token()}]},
+        {Tesla.Middleware.Headers, [{"authorization", "Bearer " <> token}]},
         Tesla.Middleware.JSON
       ],
       {Tesla.Adapter.Finch, name: TeslaMate.HTTP, receive_timeout: 25_000}
@@ -110,13 +149,15 @@ defmodule TeslaMate.XpengMate.Client do
     end
   end
 
-  defp request(method, url, body) do
+  defp request(method, url, body, token \\ token()) do
+    client = client(token)
+
     result =
       case method do
-        :get -> Tesla.get(client(), url)
-        :post -> Tesla.post(client(), url, body || %{})
-        :put -> Tesla.put(client(), url, body || %{})
-        :delete -> Tesla.delete(client(), url)
+        :get -> Tesla.get(client, url)
+        :post -> Tesla.post(client, url, body || %{})
+        :put -> Tesla.put(client, url, body || %{})
+        :delete -> Tesla.delete(client, url)
       end
 
     case result do
