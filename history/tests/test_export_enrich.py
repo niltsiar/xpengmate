@@ -67,5 +67,25 @@ class SamplesAtTest(unittest.TestCase):
         self.assertEqual(found, {first_moment: (80, 100.0, 300.0), second_moment: (70, 120.0, 250.56)})
 
 
+
+class IterSamplesTest(unittest.TestCase):
+    def test_a_day_block_out_of_place_in_one_dataset_still_joins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "export.zip")
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr(
+                    "car_driving_operation_di.csv",
+                    "timer,cdcu_totalodometer\n3,12.0\n4,13.0\n1,10.0\n2,11.0\n",
+                )
+                archive.writestr(
+                    "car_driving_power_energy_di.csv",
+                    "timer,ldcu_bms_soc_disp,ldcu_dstbatdisp_dynamic\n1,80,300\n2,79,299\n3,78,298\n4,77,\n",
+                )
+
+            joined = [(timer, sample["odometer_km"], sample["soc"], sample["range_km"]) for timer, sample in export_enrich.iter_samples(path)]
+
+        self.assertEqual(joined, [(1, 10.0, 80.0, 300.0), (2, 11.0, 79.0, 299.0), (3, 12.0, 78.0, 298.0), (4, 13.0, 77.0, None)])
+
+
 if __name__ == "__main__":
     unittest.main()

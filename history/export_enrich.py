@@ -17,7 +17,9 @@ import csv
 import heapq
 import io
 import logging
+import math
 import zipfile
+from array import array
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -81,8 +83,29 @@ def _rows(archive: zipfile.ZipFile, name: str, fields: dict[str, str]) -> Iterat
 
 
 def _stream(archive: zipfile.ZipFile, members: list[str], fields: dict[str, str]) -> Iterator[tuple[int, dict]]:
+    """The dataset's rows in timer order.
+
+    A dataset can hold one day's block out of place (seen in ``driving_operation_di``),
+    and ``_merge`` drops every row it passes out of order. The values wait in
+    compact arrays, 8 bytes per value, until all rows are read.
+    """
+    keys = list(fields)
+    timers = array("q")
+    columns = [array("d") for _key in keys]
+    in_order = True
     for name in members:
-        yield from _rows(archive, name, fields)
+        for timer, values in _rows(archive, name, fields):
+            if timers and timer < timers[-1]:
+                in_order = False
+            timers.append(timer)
+            for column, key in zip(columns, keys):
+                value = values[key]
+                column.append(math.nan if value is None else value)
+    indexes = range(len(timers)) if in_order else sorted(range(len(timers)), key=timers.__getitem__)
+    for index in indexes:
+        yield timers[index], {
+            key: None if math.isnan(column[index]) else column[index] for column, key in zip(columns, keys)
+        }
 
 
 def _merge(
