@@ -137,7 +137,7 @@ class ImportExportsTest(unittest.TestCase):
         self.events = []
         self.inserts = mock.Mock()
         self.enrich = mock.Mock(return_value=0)
-        self.energy = mock.Mock(return_value=0)
+        self.energy = mock.Mock(return_value=set())
 
         def make_store(dsn, vin, usable_kwh):
             store = _Store(dsn, vin, usable_kwh)
@@ -189,6 +189,13 @@ class ImportExportsTest(unittest.TestCase):
         self.assertEqual(summary["enrich_failed"], ["b.zip"])
         self.assertEqual(self.recorded(), ["a.zip"])
         self.assertIn("rollback", self.events)
+
+    def test_a_drive_two_zips_both_cover_counts_once_in_the_summary(self):
+        self.energy.side_effect = [{1, 2}, {2, 3}]
+
+        summary = self.run_import()
+
+        self.assertEqual(summary["drive_energies"], 3)
 
     def test_the_command_exits_1_when_the_import_is_not_ok(self):
         for ok, code in ((True, 0), (False, 1)):

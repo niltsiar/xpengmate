@@ -164,7 +164,7 @@ class StoreDriveEnergyTest(unittest.TestCase):
             export_enrich.store_drive_energy(self.store, path, 1000, 1009)
             stored = export_enrich.store_drive_energy(self.store, path, 1000, 1009)
 
-        self.assertEqual(stored, 1)
+        self.assertEqual(stored, {1})
         self.assertEqual(
             self.db.execute("SELECT * FROM xpengmate_drive_energy").fetchall(),
             [(1, round(36 * 3 / 3600, 3), round(18 / 3600, 3))],
@@ -183,7 +183,7 @@ class StoreDriveEnergyTest(unittest.TestCase):
             with self.assertLogs("xpengmate.export", "WARNING") as logs:
                 stored = export_enrich.store_drive_energy(self.store, path, 1000, 3100)
 
-        self.assertEqual(stored, 1)
+        self.assertEqual(stored, {1})
         self.assertEqual([row[0] for row in self.db.execute("SELECT drive_id FROM xpengmate_drive_energy")], [1])
         self.assertEqual(self.db.execute("SELECT power_max, power_min FROM drives WHERE id = 3").fetchone(), (0, 0))
         self.assertEqual(len(logs.records), 1)

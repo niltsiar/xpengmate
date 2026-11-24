@@ -285,8 +285,8 @@ def _utc(epoch: int) -> datetime:
     return datetime.fromtimestamp(epoch, timezone.utc).replace(tzinfo=None)
 
 
-def store_drive_energy(store: Any, zip_path: str, timer_start: int, timer_end: int) -> int:
-    """Energy and power extremes of each drive the export covers; returns how many drives.
+def store_drive_energy(store: Any, zip_path: str, timer_start: int, timer_end: int) -> set[int]:
+    """Energy and power extremes of each drive the export covers; returns the ids of those drives.
 
     A drive the export covers for less than ``COVERAGE_FLOOR`` of its duration gets nothing:
     a partial sum and partial power extremes would pass for the whole drive.
@@ -329,7 +329,7 @@ def store_drive_energy(store: Any, zip_path: str, timer_start: int, timer_end: i
             )
     store.conn.commit()
     _LOGGER.info("drive energy from %s: %d drives", Path(zip_path).name, len(energies))
-    return len(energies)
+    return set(energies)
 
 
 def resolve_zip(path: str) -> str:

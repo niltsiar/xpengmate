@@ -107,7 +107,7 @@ class Importer:
         self.skipped_states = 0
         self.tyre_updates = 0
         self.enriched = 0
-        self.drive_energies = 0
+        self.energy_drive_ids: set[int] = set()
         self.enrich_failed: list[str] = []
 
     # -- schema / bookkeeping ---------------------------------
@@ -520,7 +520,7 @@ class Importer:
             try:
                 self.enriched += export_enrich.enrich(self.store, data.path)
                 if data.samples:
-                    self.drive_energies += export_enrich.store_drive_energy(
+                    self.energy_drive_ids |= export_enrich.store_drive_energy(
                         self.store, data.path, data.timer_start, data.timer_end
                     )
             except Exception:  # noqa: BLE001 - one zip must not stop the others
@@ -541,7 +541,7 @@ class Importer:
             "skipped_states": self.skipped_states,
             "tyre_positions": self.tyre_updates,
             "enriched_positions": self.enriched,
-            "drive_energies": self.drive_energies,
+            "drive_energies": len(self.energy_drive_ids),
             "enrich_failed": self.enrich_failed,
             "files": self.imports,
         }
