@@ -42,6 +42,9 @@ ODOMETER_MAX = 2_000_000.0
 #: How far a position may be from the export sample it borrows.
 TOLERANCE_SECONDS = 5
 
+#: The share of a drive's duration the export must have samples for before its energy is stored.
+COVERAGE_FLOOR = 0.9
+
 DRIVE_ENERGY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS xpengmate_drive_energy (
     drive_id             integer          PRIMARY KEY REFERENCES drives (id) ON DELETE CASCADE,
@@ -240,6 +243,7 @@ class DriveEnergy:
     recovered_kwh: float = 0.0
     power_max: float | None = None
     power_min: float | None = None
+    seconds: float = 0.0
 
 
 def drive_energy(
@@ -249,6 +253,7 @@ def drive_energy(
 
     The windows must not overlap. A step longer than ``MAX_STEP_SECONDS`` is a gap in
     the export and adds no energy; a step that starts in another drive adds none either.
+    ``seconds`` is the time of the steps that were integrated.
     """
     ordered = sorted(windows, key=lambda window: window[1])
     found: dict[int, DriveEnergy] = {}
@@ -267,6 +272,7 @@ def drive_energy(
         energy.power_max = power if energy.power_max is None else max(energy.power_max, power)
         energy.power_min = power if energy.power_min is None else min(energy.power_min, power)
         if previous is not None and previous[0] == drive_id and 0 < timer - previous[1] <= MAX_STEP_SECONDS:
+            energy.seconds += timer - previous[1]
             kwh = power * (timer - previous[1]) / 3600.0
             if kwh > 0:
                 energy.used_kwh += kwh
@@ -281,7 +287,11 @@ def _utc(epoch: int) -> datetime:
 
 
 def store_drive_energy(store: Any, zip_path: str, timer_start: int, timer_end: int) -> int:
-    """Energy and power extremes of each drive the export covers whole; returns how many drives."""
+    """Energy and power extremes of each drive the export covers; returns how many drives.
+
+    A drive the export covers for less than ``COVERAGE_FLOOR`` of its duration gets nothing:
+    a partial sum and partial power extremes would pass for the whole drive.
+    """
     with store.conn.cursor() as cur:
         cur.execute(
             "SELECT id, start_date, end_date FROM drives"
@@ -292,7 +302,19 @@ def store_drive_energy(store: Any, zip_path: str, timer_start: int, timer_end: i
             (int(drive_id), start.replace(tzinfo=timezone.utc).timestamp(), end.replace(tzinfo=timezone.utc).timestamp())
             for drive_id, start, end in cur.fetchall()
         ]
-    energies = drive_energy(windows, iter_samples(zip_path))
+    found = drive_energy(windows, iter_samples(zip_path))
+    energies = {
+        drive_id: found[drive_id]
+        for drive_id, start, end in windows
+        if drive_id in found and found[drive_id].seconds >= COVERAGE_FLOOR * (end - start)
+    }
+    skipped = sorted({drive_id for drive_id, _start, _end in windows} - set(energies))
+    if skipped:
+        _LOGGER.warning(
+            "drive energy from %s: no energy for drives %s, the export covers too little of them",
+            Path(zip_path).name,
+            skipped,
+        )
     with store.conn.cursor() as cur:
         for drive_id, energy in energies.items():
             cur.execute(

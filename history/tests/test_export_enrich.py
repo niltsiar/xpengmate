@@ -120,6 +120,16 @@ class DriveEnergyTest(unittest.TestCase):
         self.assertAlmostEqual(energy[1].used_kwh, 36 * 4 / 3600)
         self.assertAlmostEqual(energy[1].recovered_kwh, 18 * 2 / 3600)
         self.assertEqual((energy[1].power_max, energy[1].power_min), (36.0, -18.0))
+        self.assertEqual(energy[1].seconds, 6)
+
+    def test_a_gap_in_the_middle_of_a_window_loses_its_step_and_keeps_both_parts(self):
+        energy = export_enrich.drive_energy(
+            [(1, 100.0, 120.0)],
+            power(*[(timer, 400, 90) for timer in (*range(100, 104), *range(110, 114))]),
+        )
+
+        self.assertAlmostEqual(energy[1].used_kwh, 36 * 6 / 3600)
+        self.assertEqual(energy[1].seconds, 6)
 
     def test_two_drives_in_one_trip_each_take_only_their_own_steps(self):
         energy = export_enrich.drive_energy(
@@ -162,6 +172,34 @@ class StoreDriveEnergyTest(unittest.TestCase):
             self.db.execute("SELECT id, power_max, power_min FROM drives ORDER BY id").fetchall(),
             [(1, 36, -18), (2, 0, 0)],
         )
+
+
+    def test_a_drive_with_a_hole_over_ten_percent_gets_no_energy_and_keeps_its_power_extremes(self):
+        self.db.execute("INSERT INTO drives VALUES (3, 1, ?, ?, 0, 0)", (utc(3000), utc(3060)))
+        rows = [(t, 100.0, 80, 300.0, 400, 90) for t in range(1000, 3100) if not 3020 < t < 3030]
+        with tempfile.TemporaryDirectory() as directory:
+            path = export_zip(directory, "export.zip", rows)
+            with self.assertLogs("xpengmate.export", "WARNING") as logs:
+                stored = export_enrich.store_drive_energy(self.store, path, 1000, 3100)
+
+        self.assertEqual(stored, 1)
+        self.assertEqual([row[0] for row in self.db.execute("SELECT drive_id FROM xpengmate_drive_energy")], [1])
+        self.assertEqual(self.db.execute("SELECT power_max, power_min FROM drives WHERE id = 3").fetchone(), (0, 0))
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn("[3]", logs.output[0])
+
+    def test_a_drive_the_export_covers_at_95_percent_gets_its_energy(self):
+        self.db.execute("INSERT INTO drives VALUES (4, 1, ?, ?, 0, 0)", (utc(2000), utc(2120)))
+        rows = [(t, 100.0, 80, 300.0, 400, 90) for t in range(1000, 2200) if not 2050 < t < 2056]
+        with tempfile.TemporaryDirectory() as directory:
+            path = export_zip(directory, "export.zip", rows)
+            export_enrich.store_drive_energy(self.store, path, 1000, 2200)
+
+        self.assertEqual(
+            self.db.execute("SELECT energy_used_kwh FROM xpengmate_drive_energy WHERE drive_id = 4").fetchone(),
+            (round(36 * 114 / 3600, 3),),
+        )
+        self.assertEqual(self.db.execute("SELECT power_max FROM drives WHERE id = 4").fetchone(), (36,))
 
 
 class PositionUpdatesTest(unittest.TestCase):
