@@ -19,11 +19,12 @@ defmodule TeslaMateWeb.XpengMateLive.Index do
   @upload_keys [:ca_chain, :client_cert, :client_key, :tenant, :tokens]
 
   @impl true
-  def mount(_params, _session, socket) do
+  def mount(_params, session, socket) do
     socket =
       socket
       |> assign(
         page_title: gettext("XpengMate"),
+        over_https: session["over_https"],
         loading: true,
         hydrating: false,
         pending_save: false,

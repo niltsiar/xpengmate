@@ -486,44 +486,54 @@
               "Needs the account of the car owner. The request takes a few minutes. The email and the password are not stored."
             )}
           </p>
-          <%!-- phx-update="ignore" keeps the typed values when the status poll
-               re-renders this card. --%>
-          <form
-            id="export-request-form"
-            phx-update="ignore"
-            action="/xpengmate/export-request"
-            method="post"
-          >
-            <input type="hidden" name="_csrf_token" value={Plug.CSRFProtection.get_csrf_token()} />
-            <div class="field is-grouped is-grouped-multiline">
-              <div class="control">
-                <input
-                  class="input is-small"
-                  type="email"
-                  name="email"
-                  autocomplete="username"
-                  placeholder={gettext("Email")}
-                  required
-                />
+          <%= if @over_https do %>
+            <%!-- phx-update="ignore" keeps the typed values when the status poll
+                 re-renders this card. --%>
+            <form
+              id="export-request-form"
+              phx-update="ignore"
+              action="/xpengmate/export-request"
+              method="post"
+            >
+              <input
+                type="hidden"
+                name="_csrf_token"
+                value={Plug.CSRFProtection.get_csrf_token()}
+              />
+              <div class="field is-grouped is-grouped-multiline">
+                <div class="control">
+                  <input
+                    class="input is-small"
+                    type="email"
+                    name="email"
+                    autocomplete="username"
+                    placeholder={gettext("Email")}
+                    required
+                  />
+                </div>
+                <div class="control">
+                  <input
+                    class="input is-small"
+                    type="password"
+                    name="password"
+                    autocomplete="current-password"
+                    placeholder={gettext("Password")}
+                    required
+                  />
+                </div>
+                <div class="control">
+                  <button class="button is-small is-primary" type="submit">
+                    <span class="icon"><i class="mdi mdi-cloud-download"></i></span>
+                    <span>{gettext("Request export")}</span>
+                  </button>
+                </div>
               </div>
-              <div class="control">
-                <input
-                  class="input is-small"
-                  type="password"
-                  name="password"
-                  autocomplete="current-password"
-                  placeholder={gettext("Password")}
-                  required
-                />
-              </div>
-              <div class="control">
-                <button class="button is-small is-primary" type="submit">
-                  <span class="icon"><i class="mdi mdi-cloud-download"></i></span>
-                  <span>{gettext("Request export")}</span>
-                </button>
-              </div>
-            </div>
-          </form>
+            </form>
+          <% else %>
+            <p id="export-request-https" class="help mb-2">
+              {gettext("Open this page over HTTPS to request the export.")}
+            </p>
+          <% end %>
           <%= case @dataact do %>
             <% {:error, reason} -> %>
               <div class="notification is-warning is-light">

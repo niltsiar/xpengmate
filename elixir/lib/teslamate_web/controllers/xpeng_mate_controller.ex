@@ -102,6 +102,12 @@ defmodule TeslaMateWeb.XpengMateController do
     end
   end
 
+  @doc """
+  The session of the `:default` live routes. The XpengMate page shows the
+  export request form only when this page request came over HTTPS.
+  """
+  def live_session(conn), do: %{"over_https" => over_https?(conn)}
+
   # The app sits behind a TLS proxy; a direct request to the app port is plain HTTP.
   defp over_https?(conn) do
     conn.scheme == :https or get_req_header(conn, "x-forwarded-proto") == ["https"]
@@ -117,7 +123,7 @@ defmodule TeslaMateWeb.XpengMateController do
   defp request_error(:running), do: gettext("An export request is already running.")
 
   defp request_error(:cooldown),
-    do: gettext("A recent XPENG login failed. Wait 15 minutes, then try again.")
+    do: gettext("A recent XPENG login failed. Try again later.")
 
   defp request_error(:unreachable), do: gettext("The export request service is unreachable.")
   defp request_error(_), do: gettext("The export request service refused the request.")

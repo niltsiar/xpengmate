@@ -39,7 +39,7 @@ defmodule TeslaMateWeb.Router do
     get "/notice", LegalController, :notice
     get "/license", LegalController, :license
 
-    live_session :default do
+    live_session :default, session: {TeslaMateWeb.XpengMateController, :live_session, []} do
       live "/sign_in", SignInLive.Index
       live "/settings", SettingsLive.Index
       live "/xpengmate", XpengMateLive.Index

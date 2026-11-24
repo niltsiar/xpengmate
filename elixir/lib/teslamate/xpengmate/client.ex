@@ -107,17 +107,24 @@ defmodule TeslaMate.XpengMate.Client do
   @doc """
   Start the export request job with the XPENG account of the car owner.
 
-  The two 409 cases share a status, so they are told apart by the fixed texts
-  of dataact/job.mjs.
+  dataact answers both a running job and a login cooldown with 409; the
+  `reason` field of the body tells them apart.
   """
   def request_export(email, password) do
-    case dataact(:post, "/request", %{"email" => email, "password" => password}) do
-      {:ok, status} -> {:ok, status}
-      {:error, :not_configured} -> {:error, :not_configured}
-      {:error, "an export request is already running"} -> {:error, :running}
-      {:error, "a login failed" <> _} -> {:error, :cooldown}
-      {:error, "service unreachable"} -> {:error, :unreachable}
-      {:error, _} -> {:error, :rejected}
+    case dataact_url() do
+      nil ->
+        {:error, :not_configured}
+
+      url ->
+        body = %{"email" => email, "password" => password}
+
+        case call(:post, url <> "/request", body, dataact_token()) do
+          {:ok, %Tesla.Env{status: status, body: body}} when status in 200..299 -> {:ok, body}
+          {:ok, %Tesla.Env{status: 409, body: %{"reason" => "running"}}} -> {:error, :running}
+          {:ok, %Tesla.Env{status: 409, body: %{"reason" => "cooldown"}}} -> {:error, :cooldown}
+          {:ok, %Tesla.Env{}} -> {:error, :rejected}
+          {:error, _} -> {:error, :unreachable}
+        end
     end
   end
 
@@ -150,6 +157,14 @@ defmodule TeslaMate.XpengMate.Client do
   end
 
   defp request(method, url, body, token \\ token()) do
+    case call(method, url, body, token) do
+      {:ok, %Tesla.Env{status: status, body: body}} when status in 200..299 -> {:ok, body}
+      {:ok, %Tesla.Env{status: status, body: body}} -> {:error, failure_message(body, status)}
+      {:error, _} -> {:error, "service unreachable"}
+    end
+  end
+
+  defp call(method, url, body, token) do
     client = client(token)
 
     result =
@@ -161,17 +176,17 @@ defmodule TeslaMate.XpengMate.Client do
       end
 
     case result do
-      {:ok, %Tesla.Env{status: status, body: body}} when status in 200..299 ->
-        {:ok, body}
+      {:ok, %Tesla.Env{status: status}} when status in 200..299 ->
+        :ok
 
       {:ok, %Tesla.Env{status: status, body: body}} ->
         message = failure_message(body, status)
         Logger.info("XpengMate settings call failed: #{method} #{url} -> #{status} #{message}")
-        {:error, message}
 
       {:error, reason} ->
         Logger.info("XpengMate settings call unreachable: #{method} #{url} -> #{inspect(reason)}")
-        {:error, "service unreachable"}
     end
+
+    result
   end
 end
