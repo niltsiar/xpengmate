@@ -670,13 +670,16 @@ class Backfill:
         with self.conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE charging_processes cp SET position_id = (
-                    SELECT p.id FROM positions p
-                    WHERE p.car_id = cp.car_id
-                    ORDER BY abs(extract(epoch FROM p.date) - extract(epoch FROM cp.start_date))
-                    LIMIT 1
-                )
-                WHERE cp.car_id = %s AND cp.position_id IS NULL
+                UPDATE charging_processes cp SET position_id = first.position_id
+                FROM (
+                    SELECT DISTINCT ON (c.id) c.id AS charge_id, p.id AS position_id
+                    FROM charging_processes c
+                    JOIN positions p ON p.car_id = c.car_id
+                     AND p.date BETWEEN c.start_date AND COALESCE(c.end_date, c.start_date)
+                    WHERE c.car_id = %s AND c.position_id IS NULL
+                    ORDER BY c.id, p.date
+                ) first
+                WHERE cp.id = first.charge_id
                 """,
                 (self.car_id,),
             )
