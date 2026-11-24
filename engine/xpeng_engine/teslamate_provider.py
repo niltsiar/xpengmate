@@ -58,6 +58,7 @@ from .teslamate_mapping import (
     frame,
     is_charging,
     km_to_miles,
+    position,
     shift_state,
     snapshot_from_coordinator,
     stable_ids,
@@ -430,6 +431,15 @@ class TeslaMateProvider:
             driving=shift_state(snapshot.raw) in ("D", "R", "N"),
         )
 
+    def _streams(self, snapshot: Telemetry) -> bool:
+        """Whether a stream frame goes out for this snapshot.
+
+        A sleeping car is quiet, exactly like a sleeping Tesla: TeslaMate relies
+        on the silence to keep it in its asleep state. A car with no position
+        yet is quiet too, so TeslaMate stores no drive position without one.
+        """
+        return self._state_for(snapshot) == "online" and position(snapshot) is not None
+
     def _find(self, requested: str) -> tuple[Telemetry, str] | None:
         try:
             wanted = int(requested)
@@ -511,6 +521,8 @@ class TeslaMateProvider:
         if found is None:
             return _not_found()
         snapshot, state = found
+        if position(snapshot) is None:
+            return _unavailable()
         energy, range_added = self._session_values(snapshot)
         vehicle = build_vehicle_data(
             snapshot,
@@ -571,9 +583,7 @@ class TeslaMateProvider:
         if not snapshots:
             return
         snapshot = snapshots[0]
-        if self._state_for(snapshot) != "online":
-            # A sleeping car is quiet, exactly like a sleeping Tesla: TeslaMate
-            # relies on the silence to keep it in its asleep state.
+        if not self._streams(snapshot):
             return
         await ws.send_json(
             frame("data:update", tag=tag,
@@ -595,7 +605,7 @@ class TeslaMateProvider:
         if not snapshots:
             return
         snapshot = snapshots[0]
-        if self._state_for(snapshot) != "online":
+        if not self._streams(snapshot):
             return
         value = stream_value(snapshot)
         for ws, tag in clients:
@@ -631,6 +641,15 @@ def _site_port(site: Any, fallback: int) -> int:
         except (IndexError, OSError, TypeError, ValueError):
             continue
     return fallback
+
+
+def _unavailable() -> Any:
+    # TeslaMate maps a 408 whose error starts with "vehicle unavailable:" to
+    # :vehicle_unavailable and falls back to /vehicles/{id}, which stores no position.
+    return web.json_response(
+        {"error": "vehicle unavailable: no GPS fix yet", "response": None},
+        status=408,
+    )
 
 
 def _not_found() -> Any:

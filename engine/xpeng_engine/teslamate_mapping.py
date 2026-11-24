@@ -21,7 +21,8 @@ Two rules shape everything here:
   discarded ("incomplete fetch result"); a missing ``latitude``/``timestamp``
   makes the position insert fail and crashes the car's logger. So the builders
   below always emit the whole shape, carrying the last known position forward
-  when a frame happens not to include one.
+  when a frame happens not to include one. Before the car's first GPS fix there
+  is no position at all, and the provider serves no vehicle data then.
 
 Pure: no Home Assistant import, so it is testable with plain ``python3``.
 """
@@ -516,21 +517,21 @@ def _timestamp_ms(snapshot: Telemetry) -> int:
     return int(snapshot.data_ms or snapshot.now_ms or _now_ms())
 
 
-def _position(snapshot: Telemetry) -> tuple[float, float]:
+def position(snapshot: Telemetry) -> tuple[float, float] | None:
     """Latitude/longitude, carried forward when the frame has none.
 
     A position is mandatory in TeslaMate's ``positions`` table; without one the
     insert raises and TeslaMate's car process crashes. The provider therefore
-    remembers the last position it served, and this is the last-resort value
-    used only before a car has ever reported one.
+    remembers the last position it served. None before the car has ever
+    reported one: a stand-in such as 0, 0 would be stored as a real place.
     """
     lat = as_float(dig(snapshot.raw, "interval", "drive", "latitude"))
     lon = as_float(dig(snapshot.raw, "interval", "drive", "longitude"))
-    if lat is None:
-        lat = snapshot.fallback_latitude
-    if lon is None:
-        lon = snapshot.fallback_longitude
-    return (lat if lat is not None else 0.0, lon if lon is not None else 0.0)
+    if lat is None or lon is None:
+        lat, lon = snapshot.fallback_latitude, snapshot.fallback_longitude
+    if lat is None or lon is None:
+        return None
+    return lat, lon
 
 
 def _power_kw(snapshot: Telemetry) -> int:
@@ -557,8 +558,8 @@ def _battery(snapshot: Telemetry) -> tuple[int | None, float | None]:
 
 
 def build_drive_state(snapshot: Telemetry) -> dict[str, Any]:
-    """Tesla's ``drive_state``."""
-    latitude, longitude = _position(snapshot)
+    """Tesla's ``drive_state``. The snapshot must have a ``position``."""
+    latitude, longitude = position(snapshot)
     heading = as_float(dig(snapshot.raw, "interval", "drive", "angle"))
     speed = kmh_to_mph(as_float(dig(snapshot.raw, "interval", "drive", "speed")))
     timestamp = _timestamp_ms(snapshot)
@@ -965,7 +966,7 @@ def stream_value(snapshot: Telemetry) -> str:
     signal and it would refuse to treat a real wake-up as one.
     """
     soc, range_miles = _battery(snapshot)
-    latitude, longitude = _position(snapshot)
+    latitude, longitude = position(snapshot)
     heading = as_float(dig(snapshot.raw, "interval", "drive", "angle"))
     speed_mph = kmh_to_mph(as_float(dig(snapshot.raw, "interval", "drive", "speed")))
     odometer_km = as_float(dig(snapshot.raw, "instant", "odometer", "total_mileage"))

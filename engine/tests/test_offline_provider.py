@@ -65,11 +65,20 @@ PARKED_RAW = {
 }
 
 
+#: The same car before its first GPS fix: the frame has no latitude/longitude.
+NO_FIX_RAW = {
+    **PARKED_RAW,
+    "interval": {**PARKED_RAW["interval"], "drive": {"speed": 0, "angle": 90}},
+}
+
+
 @unittest.skipIf(aiohttp is None, "aiohttp is not installed")
-class OfflineProviderTest(unittest.IsolatedAsyncioTestCase):
+class _ProviderCase(unittest.IsolatedAsyncioTestCase):
+    RAW = PARKED_RAW
+
     async def asyncSetUp(self) -> None:
         self.state = EngineState(VIN, usable_battery_kwh=87.5, name="XPeng G6")
-        self.state.set_raw_snapshot(PARKED_RAW)
+        self.state.set_raw_snapshot(self.RAW)
         self.state.set_xos_version("5.9.5")
         self.state.update_poll_status(mqtt_connected=True)
         self.provider = TeslaMateProvider(
@@ -89,6 +98,8 @@ class OfflineProviderTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 200, await response.text())
             return await response.json()
 
+
+class OfflineProviderTest(_ProviderCase):
     async def test_contract(self) -> None:
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -155,6 +166,40 @@ class OfflineProviderTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status, 200)
                 health = await response.json()
             self.assertTrue(health.get("ok"))
+
+
+class NoPositionYetTest(_ProviderCase):
+    RAW = NO_FIX_RAW
+
+    async def test_no_position_is_served_until_the_car_reports_one(self) -> None:
+        async with aiohttp.ClientSession() as session:
+            products = await self._get(session, "/api/1/products")
+            vehicle_id = products["response"][0]["id"]
+            await self._get(session, f"/api/1/vehicles/{vehicle_id}")
+
+            async with session.get(
+                f"{self.base}/api/1/vehicles/{vehicle_id}/vehicle_data", headers=self.headers
+            ) as response:
+                self.assertEqual(response.status, 408)
+                self.assertTrue((await response.json())["error"].startswith("vehicle unavailable:"))
+
+            async with session.ws_connect(f"{self.base}/streaming/", headers=self.headers) as websocket:
+                await websocket.send_json(
+                    {"msg_type": "data:subscribe_oauth", "token": TOKEN,
+                     "tag": str(products["response"][0]["vehicle_id"]), "value": "speed,est_lat,est_lng"}
+                )
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(websocket.receive_json(), timeout=0.5)
+
+            self.state.set_raw_snapshot(PARKED_RAW)
+            data = await self._get(session, f"/api/1/vehicles/{vehicle_id}/vehicle_data")
+            drive = data["response"]["drive_state"]
+            self.assertEqual((drive["latitude"], drive["longitude"]), (-33.8688, 151.2093))
+
+            self.state.set_raw_snapshot(NO_FIX_RAW)
+            data = await self._get(session, f"/api/1/vehicles/{vehicle_id}/vehicle_data")
+            drive = data["response"]["drive_state"]
+            self.assertEqual((drive["latitude"], drive["longitude"]), (-33.8688, 151.2093))
 
 
 if __name__ == "__main__":

@@ -17,10 +17,10 @@ the working-tree copy this engine was built from was byte-identical to it).
 | `xpeng_errors.py` | `custom_components/xpeng/xpeng_errors.py` | |
 | `mqtt_client.py` | `custom_components/xpeng/mqtt_client.py` | |
 | `vin_descriptor.py` | `custom_components/xpeng/vin_descriptor.py` | |
-| `teslamate_mapping.py` | `custom_components/xpeng/teslamate_mapping.py` | modified, now `55b6fd44…` |
-| `teslamate_provider.py` | `custom_components/xpeng/teslamate_provider.py` | `ad6d475f…` |
+| `teslamate_mapping.py` | `custom_components/xpeng/teslamate_mapping.py` | modified, now `c4e64bb3…` |
+| `teslamate_provider.py` | `custom_components/xpeng/teslamate_provider.py` | modified, now `591b274d…` |
 
-Only three things differ from upstream:
+These things differ from upstream:
 
 * `const.py` is **not** vendored — upstream's imports Home Assistant's sensor and
   binary-sensor device classes. `xpeng_engine/const.py` provides the three plain
@@ -33,6 +33,11 @@ Only three things differ from upstream:
   charge fields and derives the AC `charger_phases`. Above 270 V a sample is 3-phase AC only when P / (V * I)
   is between 1.4 and 2.1; then the voltage becomes the per-phase value. Any other sample is DC.
   A refresh must re-apply this change.
+* `teslamate_provider.py` sends the car's own session energy (`charge_capacity`, the energy
+  at the inlet) and never an estimate from the battery percentage.
+* `teslamate_mapping.py` and `teslamate_provider.py` serve no position before the car's
+  first GPS fix: `vehicle_data` answers 408 "vehicle unavailable" and the stream sends no
+  frame. TeslaMate then stores no position, instead of one at latitude 0, longitude 0.
 
 Everything else in `xpeng_engine/` (`config.py`, `state.py`, `api_session.py`,
 `service.py`) is original to this project.
