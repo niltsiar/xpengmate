@@ -61,9 +61,10 @@ class _ServerCase(unittest.IsolatedAsyncioTestCase):
         await self.client.start_server()
         self.addAsyncCleanup(self.client.close)
 
-    async def upload(self):
+    async def upload(self, *names: str):
         data = FormData()
-        data.add_field("file", b"PK\x03\x04", filename="export.zip")
+        for name in names or ("export.zip",):
+            data.add_field("file", b"PK\x03\x04", filename=name)
         with mock.patch.object(
             server.asyncio, "create_subprocess_exec", return_value=_FakeProcess()
         ) as spawn:
@@ -71,6 +72,29 @@ class _ServerCase(unittest.IsolatedAsyncioTestCase):
             if self.service._export_task is not None:
                 await self.service._export_task
         return response, spawn
+
+    async def start_slow_upload(self, release: asyncio.Event) -> "asyncio.Task":
+        """Starts an upload of first.zip that holds its last bytes until `release` is set."""
+
+        async def slow_body():
+            yield (
+                b"--B\r\nContent-Disposition: form-data; name=\"file\"; "
+                b"filename=\"first.zip\"\r\n\r\nPK\x03\x04"
+            )
+            await release.wait()
+            yield b"\r\n--B--\r\n"
+
+        task = asyncio.create_task(
+            self.client.post(
+                "/exports",
+                data=slow_body(),
+                headers={"Content-Type": "multipart/form-data; boundary=B"},
+            )
+        )
+        async with asyncio.timeout(5):
+            while not _stored():
+                await asyncio.sleep(0.01)
+        return task
 
 
 class UploadSeededFromEnvTest(_ServerCase):
@@ -135,28 +159,11 @@ class ParallelUploadTest(_ServerCase):
 
     async def test_upload_that_starts_during_another_upload_is_refused(self):
         release = asyncio.Event()
-
-        async def slow_body():
-            yield (
-                b"--B\r\nContent-Disposition: form-data; name=\"file\"; "
-                b"filename=\"first.zip\"\r\n\r\nPK\x03\x04"
-            )
-            await release.wait()
-            yield b"\r\n--B--\r\n"
-
         with mock.patch.object(
             server.asyncio, "create_subprocess_exec", return_value=_FakeProcess()
         ):
-            first = asyncio.create_task(
-                self.client.post(
-                    "/exports",
-                    data=slow_body(),
-                    headers={"Content-Type": "multipart/form-data; boundary=B"},
-                )
-            )
+            first = await self.start_slow_upload(release)
             try:
-                while not _stored():
-                    await asyncio.sleep(0.01)
                 second, _ = await self.upload()
             finally:
                 release.set()
@@ -166,6 +173,48 @@ class ParallelUploadTest(_ServerCase):
         self.assertEqual(second.status, 409)
         self.assertEqual(first_response.status, 200)
         self.assertEqual(_stored(), ["first.zip"])
+
+
+class SyncDuringUploadTest(_ServerCase):
+    stored_config = {"mode": "api", "api_url": "https://example.test", "api_key": "test-key"}
+    env = {"XPENG_VIN": "TESTVIN0000000001"}
+
+    async def test_sync_is_refused_while_an_upload_still_streams(self):
+        release = asyncio.Event()
+        with mock.patch.object(
+            server.asyncio, "create_subprocess_exec", return_value=_FakeProcess()
+        ), mock.patch.object(server.HistoryService, "_run_import", mock.AsyncMock()) as run:
+            upload = await self.start_slow_upload(release)
+            try:
+                response = await self.client.post("/sync")
+            finally:
+                release.set()
+            await upload
+            if self.service._export_task is not None:
+                await self.service._export_task
+        self.assertEqual(response.status, 409)
+        self.assertEqual(await response.json(), {"error": "an import is already running"})
+        run.assert_not_called()
+
+
+class MultiFileUploadTest(_ServerCase):
+    env = {"XPENG_VIN": "TESTVIN0000000001"}
+
+    async def test_two_files_in_one_upload_are_both_stored_and_imported(self):
+        response, spawn = await self.upload("first.zip", "second.zip")
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())["files"], ["first.zip", "second.zip"])
+        self.assertEqual(_stored(), ["first.zip", "second.zip"])
+        importer = spawn.call_args_list[0].args
+        self.assertEqual(importer[1], "export_import.py")
+        self.assertEqual([os.path.basename(a) for a in importer[2:]], ["first.zip", "second.zip"])
+
+    async def test_the_same_file_name_twice_is_refused_with_a_fixed_reply(self):
+        response, spawn = await self.upload("same.zip", "same.zip")
+        self.assertEqual(response.status, 400)
+        self.assertEqual(await response.json(), {"error": "the upload holds the same file name twice"})
+        spawn.assert_not_called()
+        self.assertEqual(_stored(), [])
 
 
 class PartialUploadTest(_ServerCase):
@@ -220,6 +269,16 @@ class UploadTokenTest(_ServerCase):
         self.assertEqual(response.status, 200)
 
 
+class EmptyUploadTokenTest(_ServerCase):
+    token = "test-token"
+
+    async def test_an_empty_bearer_is_refused_when_no_upload_token_is_set(self):
+        for header in ("Bearer ", "Bearer"):
+            with self.subTest(header=header):
+                response = await self.client.get("/exports", headers={"Authorization": header})
+                self.assertEqual(response.status, 401)
+
+
 class UploadWithoutVinTest(_ServerCase):
     async def test_no_vin_anywhere_is_rejected(self):
         response, spawn = await self.upload()
@@ -232,6 +291,24 @@ class ExportsStatusVinTest(_ServerCase):
         self.assertIs((await (await self.client.get("/exports")).json())["vin_set"], False)
         await self.client.put("/config", json={"vin": "TESTVIN0000000001"})
         self.assertIs((await (await self.client.get("/exports")).json())["vin_set"], True)
+
+
+class ExportsBusyTest(_ServerCase):
+    async def test_busy_is_set_while_a_sync_an_upload_or_an_import_runs(self):
+        async def busy() -> bool:
+            return (await (await self.client.get("/exports")).json())["busy"]
+
+        self.assertIs(await busy(), False)
+        self.service._task = asyncio.create_task(asyncio.sleep(60))
+        self.addCleanup(self.service._task.cancel)
+        self.assertIs(await busy(), True)
+        self.service._task.cancel()
+        self.service._uploading = True
+        self.assertIs(await busy(), True)
+        self.service._uploading = False
+        self.service._export_task = asyncio.create_task(asyncio.sleep(60))
+        self.addCleanup(self.service._export_task.cancel)
+        self.assertIs(await busy(), True)
 
 
 class HealthzTest(_ServerCase):

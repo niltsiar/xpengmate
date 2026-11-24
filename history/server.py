@@ -366,15 +366,22 @@ class HistoryService:
         _LOGGER.info("history configuration updated: %s", sorted(update))
         return web.json_response({"ok": True, "config": config_public(self.settings)})
 
+    def _busy_reason(self) -> str | None:
+        """Why a sync or an export upload cannot start now; None when both can."""
+        if self._task is not None and not self._task.done():
+            return "a sync is already running"
+        if self._uploading or (self._export_task is not None and not self._export_task.done()):
+            return "an import is already running"
+        return None
+
     async def handle_sync(self, request: "web.Request") -> "web.Response":
         if not self.configured:
             return web.json_response(
                 {"error": "history source is not configured"}, status=409
             )
-        if self._task is not None and not self._task.done():
-            return web.json_response({"error": "a sync is already running"}, status=409)
-        if self._uploading or (self._export_task is not None and not self._export_task.done()):
-            return web.json_response({"error": "an import is already running"}, status=409)
+        busy = self._busy_reason()
+        if busy:
+            return web.json_response({"error": busy}, status=409)
         self._task = asyncio.create_task(self._run_import())
         return web.json_response({"ok": True, "started": True})
 
@@ -391,6 +398,7 @@ class HistoryService:
         payload: dict[str, Any] = {
             "ok": True,
             "running": self._export_task is not None and not self._export_task.done(),
+            "busy": self._busy_reason() is not None,
             "vin_set": bool(self.settings.get("vin")),
             "last_run": read_json(EXPORT_LAST_RUN),
             "imports": imports,
@@ -433,10 +441,9 @@ class HistoryService:
             return web.json_response(
                 {"error": "set the VIN in the history source first"}, status=409
             )
-        if self._task is not None and not self._task.done():
-            return web.json_response({"error": "a sync is already running"}, status=409)
-        if self._uploading or (self._export_task is not None and not self._export_task.done()):
-            return web.json_response({"error": "an import is already running"}, status=409)
+        busy = self._busy_reason()
+        if busy:
+            return web.json_response({"error": busy}, status=409)
         self._uploading = True
         try:
             os.makedirs(EXPORT_UPLOAD_DIR, exist_ok=True)
@@ -455,6 +462,10 @@ class HistoryService:
                             {"error": f"{filename} is not a .zip export"}, status=400
                         )
                     target = os.path.join(EXPORT_UPLOAD_DIR, filename)
+                    if any(target == done for _, done in staged):
+                        return web.json_response(
+                            {"error": "the upload holds the same file name twice"}, status=400
+                        )
                     staged.append((target + ".part", target))
                     size = 0
                     with open(staged[-1][0], "wb") as handle:
