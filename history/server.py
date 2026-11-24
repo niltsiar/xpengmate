@@ -30,6 +30,7 @@ from typing import Any
 
 import psycopg
 
+import export_enrich
 import repair_drive_gaps
 import split_charge_energy
 from close_orphan_charges import close_orphans
@@ -269,6 +270,8 @@ class HistoryService:
         with psycopg.connect(DATABASE_URL, autocommit=True) as connection:
             with connection.cursor() as cursor:
                 close_orphans(cursor)
+                # Created here, at start, so the drive details dashboard can query it before any import.
+                cursor.execute(export_enrich.DRIVE_ENERGY_SCHEMA)
             self._split_charge_energy(connection)
 
     def _split_charge_energy(self, connection: Any) -> None:

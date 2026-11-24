@@ -13,8 +13,9 @@ same drives and charges more than once. This command:
    export) is skipped, because those sources carry richer data - GPS in
    particular - and re-inserting would duplicate history. A trip whose km an
    existing drive holds is skipped too, even when the recorded times differ;
-4. attaches the export's SoC/odometer/range to existing GPS positions and the
-   hourly tyre pressures to the nearest position;
+4. attaches the export's SoC/odometer/range to existing GPS positions, the
+   pack power to drive positions, the hourly tyre pressures to the nearest
+   position, and energy used and recovered to each drive (`export_enrich`);
 5. records each imported file by content hash, so re-uploading the same file is
    a no-op and the settings page can list what has been imported.
 
@@ -106,6 +107,7 @@ class Importer:
         self.skipped_states = 0
         self.tyre_updates = 0
         self.enriched = 0
+        self.drive_energies = 0
 
     # -- schema / bookkeeping ---------------------------------
 
@@ -115,6 +117,7 @@ class Importer:
             cur.execute(SCHEMA)
             cur.execute(repair_drive_gaps.SCHEMA)
             cur.execute(repair_drive_gaps.ADD_CONFIRMED_COLUMNS)
+            cur.execute(export_enrich.DRIVE_ENERGY_SCHEMA)
         self.conn.commit()
         # A session lock, so it outlasts the per-row commits; closing the connection releases it.
         with self.conn.cursor() as cur:
@@ -510,12 +513,16 @@ class Importer:
             self.tyre_updates = cur.rowcount
         self.conn.commit()
 
-    def enrich_from(self, paths: list[str]) -> None:
-        for path in paths:
+    def enrich_from(self, files: list[ExportData]) -> None:
+        for data in files:
             try:
-                self.enriched += export_enrich.enrich(self.store, path)
+                self.enriched += export_enrich.enrich(self.store, data.path)
+                if data.samples:
+                    self.drive_energies += export_enrich.store_drive_energy(
+                        self.store, data.path, data.timer_start, data.timer_end
+                    )
             except Exception:  # noqa: BLE001 - enrichment is additive
-                _LOGGER.warning("could not enrich from %s", path, exc_info=True)
+                _LOGGER.warning("could not enrich from %s", data.path, exc_info=True)
 
     # -- finish -----------------------------------------------
 
@@ -530,6 +537,7 @@ class Importer:
             "skipped_states": self.skipped_states,
             "tyre_positions": self.tyre_updates,
             "enriched_positions": self.enriched,
+            "drive_energies": self.drive_energies,
             "files": self.imports,
         }
 
@@ -554,21 +562,19 @@ def import_exports(
                 _LOGGER.info("%s was already imported (sha %s); skipping", Path(path).name, sha[:12])
                 continue
             fresh.append(path)
-        if not fresh:
-            return {"ok": True, "duplicates": len(paths), "reconciled": reconciled, **importer.summary()}
-
-        merged = every if len(fresh) == len(paths) else parse_files(fresh)
-
-        importer.import_drives(merged.drives, importer.existing_windows("drives"))
-        importer.import_charges(
-            merged.charges, importer.existing_windows("charging_processes")
-        )
-        importer.import_states(merged.online)
-        importer.import_tyres(merged.tyres)
-        importer.enrich_from(fresh)
+        if fresh:
+            merged = every if len(fresh) == len(paths) else parse_files(fresh)
+            importer.import_drives(merged.drives, importer.existing_windows("drives"))
+            importer.import_charges(
+                merged.charges, importer.existing_windows("charging_processes")
+            )
+            importer.import_states(merged.online)
+            importer.import_tyres(merged.tyres)
+        # Every zip given, so a zip imported before gets the current enrichment and energy rules.
+        importer.enrich_from(every.files)
         # Recorded only after the rows landed, so a failed import can be retried.
         for path in fresh:
-            data = next(item for item in merged.files if item.path == path)
+            data = next(item for item in every.files if item.path == path)
             importer.record_file(data, file_sha256(path), os.path.getsize(path))
         summary = importer.summary()
         summary.update(
@@ -577,7 +583,7 @@ def import_exports(
                 "duplicates": len(paths) - len(fresh),
                 "files_imported": len(fresh),
                 "reconciled": reconciled,
-                "vin": merged.vin or vin,
+                "vin": every.vin or vin,
             }
         )
         _LOGGER.info("export import complete: %s", json.dumps(summary, default=str)[:800])
