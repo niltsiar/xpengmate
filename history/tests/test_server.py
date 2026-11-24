@@ -3,12 +3,18 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 
 import server
+
+
+def _stored() -> list[str]:
+    directory = server.EXPORT_UPLOAD_DIR
+    return sorted(os.listdir(directory)) if os.path.isdir(directory) else []
 
 
 class _FakeProcess:
@@ -24,6 +30,7 @@ class _ServerCase(unittest.IsolatedAsyncioTestCase):
     stored_config: dict = {}
     env: dict = {}
     token = ""
+    upload_token = ""
 
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -44,6 +51,7 @@ class _ServerCase(unittest.IsolatedAsyncioTestCase):
             "EXPORT_LAST_RUN": os.path.join(self.tmp.name, "export_last_run.json"),
             "DATABASE_URL": "",
             "TOKEN": self.token,
+            "UPLOAD_TOKEN": self.upload_token,
         }.items():
             patcher = mock.patch.object(server, name, value)
             patcher.start()
@@ -94,6 +102,122 @@ class UploadStoredValueWinsTest(_ServerCase):
         environment = spawn.call_args.kwargs["env"]
         self.assertEqual(environment["XPENG_VIN"], "TESTVIN0000000002")
         self.assertEqual(environment["XPENG_USABLE_BATTERY_KWH"], "70")
+
+
+class UploadWhileSyncRunsTest(_ServerCase):
+    env = {"XPENG_VIN": "TESTVIN0000000001"}
+
+    async def test_upload_is_refused_while_a_sync_runs_and_stores_nothing(self):
+        self.service._task = asyncio.create_task(asyncio.sleep(60))
+        self.addCleanup(self.service._task.cancel)
+        response, spawn = await self.upload()
+        self.assertEqual(response.status, 409)
+        self.assertEqual(await response.json(), {"error": "a sync is already running"})
+        spawn.assert_not_called()
+        self.assertEqual(_stored(), [])
+
+
+class SyncWhileExportImportRunsTest(_ServerCase):
+    stored_config = {"mode": "api", "api_url": "https://example.test", "api_key": "test-key"}
+
+    async def test_sync_is_refused_while_an_export_import_runs(self):
+        self.service._export_task = asyncio.create_task(asyncio.sleep(60))
+        self.addCleanup(self.service._export_task.cancel)
+        with mock.patch.object(server.HistoryService, "_run_import", mock.AsyncMock()) as run:
+            response = await self.client.post("/sync")
+        self.assertEqual(response.status, 409)
+        self.assertEqual(await response.json(), {"error": "an import is already running"})
+        run.assert_not_called()
+
+
+class ParallelUploadTest(_ServerCase):
+    env = {"XPENG_VIN": "TESTVIN0000000001"}
+
+    async def test_upload_that_starts_during_another_upload_is_refused(self):
+        release = asyncio.Event()
+
+        async def slow_body():
+            yield (
+                b"--B\r\nContent-Disposition: form-data; name=\"file\"; "
+                b"filename=\"first.zip\"\r\n\r\nPK\x03\x04"
+            )
+            await release.wait()
+            yield b"\r\n--B--\r\n"
+
+        with mock.patch.object(
+            server.asyncio, "create_subprocess_exec", return_value=_FakeProcess()
+        ):
+            first = asyncio.create_task(
+                self.client.post(
+                    "/exports",
+                    data=slow_body(),
+                    headers={"Content-Type": "multipart/form-data; boundary=B"},
+                )
+            )
+            try:
+                while not _stored():
+                    await asyncio.sleep(0.01)
+                second, _ = await self.upload()
+            finally:
+                release.set()
+            first_response = await first
+            if self.service._export_task is not None:
+                await self.service._export_task
+        self.assertEqual(second.status, 409)
+        self.assertEqual(first_response.status, 200)
+        self.assertEqual(_stored(), ["first.zip"])
+
+
+class PartialUploadTest(_ServerCase):
+    env = {"XPENG_VIN": "TESTVIN0000000001"}
+
+    async def test_upload_cut_off_mid_stream_leaves_no_zip_behind(self):
+        body = (
+            b"--B\r\nContent-Disposition: form-data; name=\"file\"; "
+            b"filename=\"cut.zip\"\r\n\r\nPK\x03\x04"
+        )
+        with mock.patch.object(
+            server.asyncio, "create_subprocess_exec", return_value=_FakeProcess()
+        ) as spawn:
+            response = await self.client.post(
+                "/exports",
+                data=body,
+                headers={"Content-Type": "multipart/form-data; boundary=B"},
+            )
+        self.assertEqual(response.status, 400)
+        spawn.assert_not_called()
+        self.assertEqual(_stored(), [])
+
+    def test_readers_of_the_upload_dir_ignore_a_part_file(self):
+        directory = server.EXPORT_UPLOAD_DIR
+        os.makedirs(directory)
+        for name in ("done.zip", "half.zip.part"):
+            with open(os.path.join(directory, name), "wb") as handle:
+                handle.write(b"PK\x03\x04")
+        with mock.patch.object(server, "DATABASE_URL", "postgresql://test"), mock.patch.object(
+            server.psycopg, "connect", side_effect=OSError
+        ):
+            pending = self.service._pending_export_zips()
+        self.assertEqual([os.path.basename(path) for path in pending], ["done.zip"])
+        self.assertEqual(
+            [path.name for path in Path(directory).glob("*.zip")], ["done.zip"]
+        )
+
+
+class UploadTokenTest(_ServerCase):
+    token = "test-token"
+    upload_token = "upload-token"
+
+    async def test_upload_token_reaches_only_the_exports_routes(self):
+        headers = {"Authorization": "Bearer upload-token"}
+        self.assertEqual((await self.client.get("/exports", headers=headers)).status, 200)
+        self.assertNotEqual((await self.client.post("/exports", headers=headers)).status, 401)
+        self.assertEqual((await self.client.get("/config", headers=headers)).status, 401)
+        self.assertEqual((await self.client.post("/sync", headers=headers)).status, 401)
+
+    async def test_main_token_still_reaches_every_route(self):
+        response = await self.client.get("/config", headers={"Authorization": "Bearer test-token"})
+        self.assertEqual(response.status, 200)
 
 
 class UploadWithoutVinTest(_ServerCase):

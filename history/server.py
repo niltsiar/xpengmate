@@ -18,6 +18,7 @@ Two sources, deliberately different in what they can reach:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -52,6 +53,7 @@ EXPORT_LAST_RUN = os.environ.get("HISTORY_EXPORT_LAST_RUN", "/data/export_last_r
 EXPORT_UPLOAD_DIR = os.environ.get("HISTORY_EXPORT_DIR", "/data/exports/uploaded")
 DATABASE_URL = os.environ.get("XPENGMATE_DATABASE_URL", "")
 TOKEN = os.environ.get("XPENGMATE_HISTORY_TOKEN", "")
+UPLOAD_TOKEN = os.environ.get("XPENGMATE_HISTORY_UPLOAD_TOKEN", "")
 ORPHAN_CLOSE_INTERVAL = float(os.environ.get("HISTORY_ORPHAN_CLOSE_INTERVAL_SECONDS", "600"))
 DRIVE_REPAIR_INTERVAL = float(os.environ.get("HISTORY_DRIVE_REPAIR_INTERVAL_SECONDS", "600"))
 
@@ -218,6 +220,7 @@ class HistoryService:
         self._process: asyncio.subprocess.Process | None = None
         self._task: asyncio.Task[Any] | None = None
         self._export_task: asyncio.Task[Any] | None = None
+        self._uploading = False
         self._orphan_task: asyncio.Task[Any] | None = None
         self._repair_task: asyncio.Task[Any] | None = None
         self._usable_unset_logged = False
@@ -370,6 +373,8 @@ class HistoryService:
             )
         if self._task is not None and not self._task.done():
             return web.json_response({"error": "a sync is already running"}, status=409)
+        if self._uploading or (self._export_task is not None and not self._export_task.done()):
+            return web.json_response({"error": "an import is already running"}, status=409)
         self._task = asyncio.create_task(self._run_import())
         return web.json_response({"ok": True, "started": True})
 
@@ -427,44 +432,58 @@ class HistoryService:
             return web.json_response(
                 {"error": "set the VIN in the history source first"}, status=409
             )
-        if self._export_task is not None and not self._export_task.done():
+        if self._task is not None and not self._task.done():
+            return web.json_response({"error": "a sync is already running"}, status=409)
+        if self._uploading or (self._export_task is not None and not self._export_task.done()):
             return web.json_response({"error": "an import is already running"}, status=409)
-        os.makedirs(EXPORT_UPLOAD_DIR, exist_ok=True)
-        saved: list[str] = []
+        self._uploading = True
         try:
-            reader = await request.multipart()
-            while True:
-                part = await reader.next()
-                if part is None:
-                    break
-                if not part.filename:
-                    continue
-                filename = os.path.basename(part.filename)
-                if not filename.lower().endswith(".zip"):
-                    return web.json_response(
-                        {"error": f"{filename} is not a .zip export"}, status=400
-                    )
-                target = os.path.join(EXPORT_UPLOAD_DIR, filename)
-                size = 0
-                with open(target, "wb") as handle:
-                    while True:
-                        chunk = await part.read_chunk(1024 * 1024)
-                        if not chunk:
-                            break
-                        size += len(chunk)
-                        handle.write(chunk)
-                _LOGGER.info("stored export %s (%d bytes)", filename, size)
-                saved.append(target)
-        except Exception as exc:  # noqa: BLE001
-            _LOGGER.warning("export upload failed", exc_info=True)
-            return web.json_response({"error": str(exc)}, status=400)
-        if not saved:
-            return web.json_response({"error": "no files in the upload"}, status=400)
+            os.makedirs(EXPORT_UPLOAD_DIR, exist_ok=True)
+            staged: list[tuple[str, str]] = []
+            try:
+                reader = await request.multipart()
+                while True:
+                    part = await reader.next()
+                    if part is None:
+                        break
+                    if not part.filename:
+                        continue
+                    filename = os.path.basename(part.filename)
+                    if not filename.lower().endswith(".zip"):
+                        return web.json_response(
+                            {"error": f"{filename} is not a .zip export"}, status=400
+                        )
+                    target = os.path.join(EXPORT_UPLOAD_DIR, filename)
+                    staged.append((target + ".part", target))
+                    size = 0
+                    with open(staged[-1][0], "wb") as handle:
+                        while True:
+                            chunk = await part.read_chunk(1024 * 1024)
+                            if not chunk:
+                                break
+                            size += len(chunk)
+                            handle.write(chunk)
+                    _LOGGER.info("received export %s (%d bytes)", filename, size)
+                # A cut-off upload raises before this point, so no .zip appears for it.
+                for partial, target in staged:
+                    os.replace(partial, target)
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("export upload failed", exc_info=True)
+                return web.json_response({"error": str(exc)}, status=400)
+            finally:
+                for partial, _ in staged:
+                    if os.path.exists(partial):
+                        os.unlink(partial)
+            saved = [target for _, target in staged]
+            if not saved:
+                return web.json_response({"error": "no files in the upload"}, status=400)
 
-        self._export_task = asyncio.create_task(self._run_uploaded_export_import(saved))
-        return web.json_response(
-            {"ok": True, "started": True, "files": [os.path.basename(p) for p in saved]}
-        )
+            self._export_task = asyncio.create_task(self._run_uploaded_export_import(saved))
+            return web.json_response(
+                {"ok": True, "started": True, "files": [os.path.basename(p) for p in saved]}
+            )
+        finally:
+            self._uploading = False
 
     async def _run_uploaded_export_import(self, paths: list[str]) -> None:
         started = _now()
@@ -713,7 +732,16 @@ def build_app(service: HistoryService) -> "web.Application":
         if TOKEN and request.path != "/healthz":
             header = request.headers.get("Authorization", "")
             scheme, _, value = header.partition(" ")
-            if not (scheme.lower() == "bearer" and value.strip() == TOKEN):
+            presented = value.strip().encode() if scheme.lower() == "bearer" else b""
+            accepted = hmac.compare_digest(presented, TOKEN.encode())
+            if (
+                not accepted
+                and UPLOAD_TOKEN
+                and request.path == "/exports"
+                and request.method in ("GET", "POST")
+            ):
+                accepted = hmac.compare_digest(presented, UPLOAD_TOKEN.encode())
+            if not accepted:
                 return web.json_response({"error": "invalid_token"}, status=401)
         return await handler(request)
 
