@@ -227,6 +227,13 @@ class UploadWithoutVinTest(_ServerCase):
         spawn.assert_not_called()
 
 
+class ExportsStatusVinTest(_ServerCase):
+    async def test_exports_status_reports_whether_a_vin_is_set(self):
+        self.assertIs((await (await self.client.get("/exports")).json())["vin_set"], False)
+        await self.client.put("/config", json={"vin": "TESTVIN0000000001"})
+        self.assertIs((await (await self.client.get("/exports")).json())["vin_set"], True)
+
+
 class HealthzTest(_ServerCase):
     token = "test-token"
 

@@ -99,6 +99,7 @@ async function runJob({ email, password, portal, history, clock, dataDir, limits
   const pre = await history.exports();
   if (pre.status !== 200 || !pre.body?.ok) throw new JobError({ detail: 'history is not ready', status: pre.status });
   if (pre.body.running) throw new JobError({ detail: 'a history import is running' });
+  if (!pre.body.vin_set) throw new JobError({ detail: 'history has no VIN set' });
   const imported = new Set((pre.body.imports ?? []).map(i => i.filename));
 
   setStep('captcha');

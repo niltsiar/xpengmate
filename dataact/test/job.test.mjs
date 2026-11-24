@@ -102,6 +102,16 @@ test('keeps the zip when history answers 409 on upload', async () => {
   assert.deepEqual(readFileSync(join(env.dataDir, `${OLD}.zip`)), ZIP_BYTES);
 });
 
+test('fails before the solver and the login when history has no VIN set', async () => {
+  const env = setup({ history: fakeHistory({ vinSet: false }) });
+  const status = await run(env);
+  assert.equal(status.state, 'failed');
+  assert.equal(status.step, 'history');
+  assert.equal(status.message, 'history service check failed: history has no VIN set');
+  assert.equal(env.portal.calls.captcha, 0);
+  assert.equal(env.portal.calls.login, 0);
+});
+
 test('fails with the reason when the account has more than one owner vehicle', async () => {
   const vehicles = [{ vinToken: 'TESTVIN1', userType: 1 }, { vinToken: 'TESTVIN2', userType: 1 }, { vinToken: 'TESTVIN3', userType: 2 }];
   const env = setup({ portal: fakePortal({ vehicles }) });

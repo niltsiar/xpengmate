@@ -20,11 +20,11 @@ export function fakeClock() {
 
 // `lists` are the answers of successive activities() calls; the last one repeats.
 export function fakePortal({ vehicles = [{ vinToken: 'TESTVINTOKEN', userType: 1 }], lists = [[]], login } = {}) {
-  const calls = { login: 0, submit: [], download: [], logout: 0, close: 0 };
+  const calls = { captcha: 0, login: 0, submit: [], download: [], logout: 0, close: 0 };
   let n = 0;
   return {
     calls,
-    solveCaptcha: async () => 'validate-token',
+    solveCaptcha: async () => { calls.captcha++; return 'validate-token'; },
     login: async args => { calls.login++; if (login) await login(args); },
     vehicles: async () => vehicles,
     activities: async () => lists[Math.min(n++, lists.length - 1)],
@@ -38,12 +38,12 @@ export function fakePortal({ vehicles = [{ vinToken: 'TESTVINTOKEN', userType: 1
   };
 }
 
-export function fakeHistory({ imports = [], running = [false], uploadStatus = 200 } = {}) {
+export function fakeHistory({ imports = [], running = [false], vinSet = true, uploadStatus = 200 } = {}) {
   const calls = { uploads: [] };
   let n = 0;
   return {
     calls,
-    exports: async () => ({ status: 200, body: { ok: true, running: running[Math.min(n++, running.length - 1)], imports } }),
+    exports: async () => ({ status: 200, body: { ok: true, running: running[Math.min(n++, running.length - 1)], vin_set: vinSet, imports } }),
     upload: async (path, name) => { calls.uploads.push(name); return { status: uploadStatus }; },
   };
 }

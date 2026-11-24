@@ -391,6 +391,7 @@ class HistoryService:
         payload: dict[str, Any] = {
             "ok": True,
             "running": self._export_task is not None and not self._export_task.done(),
+            "vin_set": bool(self.settings.get("vin")),
             "last_run": read_json(EXPORT_LAST_RUN),
             "imports": imports,
             "upload_dir": EXPORT_UPLOAD_DIR,
