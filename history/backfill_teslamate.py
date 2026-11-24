@@ -18,7 +18,9 @@ empty, so the panels read zero or showed everything as DC. This backfill:
    sessions without samples one synthetic sample so the classification sticks;
 4. resolves the start/end/charge locations through Nominatim (cached in the
    ``addresses`` table) and links the drives and charges to them;
-5. derives ``cars.efficiency`` from the export range/SOC pairs.
+5. derives ``cars.efficiency`` from the export range/SOC pairs;
+6. gives closed drive edges and charges inside a geofence that geofence, and
+   fenced charges without a cost their cost, by TeslaMate's rules.
 
 It is idempotent: run it again after importing more zips.
 """
@@ -29,12 +31,14 @@ import argparse
 import datetime as dt
 import json
 import logging
+import math
 import os
 import statistics
 import sys
 import time
 import urllib.parse
 import urllib.request
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +52,102 @@ NOMINATIM = "https://nominatim.openstreetmap.org"
 USER_AGENT = "XpengMate/4.4 (self-hosted XPENGMate history import)"
 DC_POWER_THRESHOLD_KW = 20.0
 MATCH_TOLERANCE_SECONDS = 5
+#: ``earth()`` of PostgreSQL's earthdistance extension, the sphere of TeslaMate's geofences.
+EARTH_RADIUS_M = 6378168.0
+
+_GEOFENCE_EDGES = (
+    ("drives", "start_position_id", "start_geofence_id"),
+    ("drives", "end_position_id", "end_geofence_id"),
+    ("charging_processes", "position_id", "geofence_id"),
+)
+
+
+def _earth(point: tuple[Any, Any]) -> tuple[float, float, float]:
+    latitude, longitude = (math.radians(float(value)) for value in point)
+    return (
+        EARTH_RADIUS_M * math.cos(latitude) * math.cos(longitude),
+        EARTH_RADIUS_M * math.cos(latitude) * math.sin(longitude),
+        EARTH_RADIUS_M * math.sin(latitude),
+    )
+
+
+def earth_distance(a: tuple[Any, Any], b: tuple[Any, Any]) -> float:
+    """Metres between two (latitude, longitude) like ``earth_distance(ll_to_earth(..), ll_to_earth(..))``."""
+    chord = math.dist(_earth(a), _earth(b))
+    return 2 * EARTH_RADIUS_M * math.asin(min(1.0, chord / (2 * EARTH_RADIUS_M)))
+
+
+def find_geofence(geofences: list[tuple[Any, ...]], point: tuple[Any, Any]) -> int | None:
+    """TeslaMate's ``find_geofence``: the nearest (id, latitude, longitude, radius) closer than its radius."""
+    inside = []
+    for geofence_id, latitude, longitude, radius in geofences:
+        distance = earth_distance((latitude, longitude), point)
+        if distance < radius:
+            inside.append((distance, geofence_id))
+    return min(inside)[1] if inside else None
+
+
+def charge_cost(
+    billing_type: str | None, cost_per_unit: Any, session_fee: Any,
+    energy_used: Any, energy_added: Any, duration_min: Any,
+) -> Decimal | None:
+    """The cost TeslaMate's ``calculate_charge_costs`` writes, rounded like its 2-decimal column."""
+    if cost_per_unit is None and session_fee is None:
+        return None
+    if billing_type == "per_kwh":
+        quantity = max((kwh for kwh in (energy_used, energy_added) if kwh is not None), default=None)
+    elif billing_type == "per_minute":
+        quantity = duration_min
+    else:
+        return None
+    cost = Decimal(str(session_fee or 0))
+    if cost_per_unit is not None and quantity is not None:
+        cost += Decimal(str(cost_per_unit)) * Decimal(str(quantity))
+    return cost.quantize(Decimal("0.01"), ROUND_HALF_UP)
+
+
+def fill_geofences_and_costs(cursor: Any, car_id: int) -> list[dict[str, Any]]:
+    """Set NULL geofences and costs of the car's closed drives and charges; return the writes.
+
+    Open rows belong to the live app, which sets both when it closes them.
+    """
+    cursor.execute("SELECT id, latitude, longitude, radius FROM geofences")
+    geofences = cursor.fetchall()
+    changes: list[dict[str, Any]] = []
+
+    def write(table: str, row_id: int, column: str, value: Any) -> None:
+        cursor.execute(
+            f"UPDATE {table} SET {column} = %s WHERE id = %s AND {column} IS NULL", (value, row_id)
+        )
+        if cursor.rowcount:
+            _LOGGER.info("%s %s: %s = %s", table, row_id, column, value)
+            changes.append({"table": table, "id": row_id, "column": column, "value": value})
+
+    for table, position_column, geofence_column in _GEOFENCE_EDGES:
+        cursor.execute(
+            f"SELECT r.id, p.latitude, p.longitude FROM {table} r"
+            f" JOIN positions p ON p.id = r.{position_column}"
+            f" WHERE r.car_id = %s AND r.end_date IS NOT NULL AND r.{geofence_column} IS NULL"
+            " ORDER BY r.id",
+            (car_id,),
+        )
+        for row_id, latitude, longitude in cursor.fetchall():
+            geofence_id = find_geofence(geofences, (latitude, longitude))
+            if geofence_id is not None:
+                write(table, row_id, geofence_column, geofence_id)
+
+    cursor.execute(
+        "SELECT cp.id, g.billing_type, g.cost_per_unit, g.session_fee,"
+        " cp.charge_energy_used, cp.charge_energy_added, cp.duration_min"
+        " FROM charging_processes cp JOIN geofences g ON g.id = cp.geofence_id"
+        " WHERE cp.car_id = %s AND cp.end_date IS NOT NULL AND cp.cost IS NULL ORDER BY cp.id",
+        (car_id,),
+    )
+    for row_id, *billing in cursor.fetchall():
+        cost = charge_cost(*billing)
+        if cost is not None:
+            write("charging_processes", row_id, "cost", cost)
+    return changes
 
 
 def _utc(epoch: int) -> dt.datetime:
@@ -818,6 +918,19 @@ class Backfill:
         self._count("addresses_created")
         return address_id
 
+    def link_geofences_and_costs(self, dry_run: bool = False) -> list[dict[str, Any]]:
+        """``fill_geofences_and_costs`` in one transaction; a dry run rolls it back."""
+        with self.conn.cursor() as cur:
+            changes = fill_geofences_and_costs(cur, self.car_id)
+        self._count("drive_geofences", sum(c["table"] == "drives" for c in changes))
+        self._count("charge_geofences", sum(c["column"] == "geofence_id" for c in changes))
+        self._count("charge_costs", sum(c["column"] == "cost" for c in changes))
+        if dry_run:
+            self.conn.rollback()
+        else:
+            self.conn.commit()
+        return changes
+
     # -- run -------------------------------------------------
 
     def run(self, merged: MergedExport | None) -> dict[str, int]:
@@ -836,6 +949,7 @@ class Backfill:
         # Locations page showing only NSW).
         self.link_positions_and_locations()
         self.link_positions_and_locations()
+        self.link_geofences_and_costs()
         return self.stats
 
 
@@ -855,6 +969,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--usable-kwh", default=os.environ.get("XPENG_USABLE_BATTERY_KWH", "87.5"))
     parser.add_argument("--exports-dir", default=os.environ.get("HISTORY_EXPORT_DIR", ""))
     parser.add_argument("--no-geocode", action="store_true")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="only fill geofences and charge costs, print the writes, roll them back",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
@@ -863,14 +982,21 @@ def main(argv: list[str] | None = None) -> int:
     if not args.database_url or not args.vin:
         print("XPENGMATE_DATABASE_URL and XPENG_VIN are required", file=sys.stderr)
         return 2
-    merged = parse_files(args.zips) if args.zips else load_uploaded(args.exports_dir)
+    merged = None
+    if not args.dry_run:
+        merged = parse_files(args.zips) if args.zips else load_uploaded(args.exports_dir)
     backfill = Backfill(
         args.database_url,
         args.vin,
         float(args.usable_kwh),
         geocode=not args.no_geocode,
     )
-    stats = backfill.run(merged)
+    if args.dry_run:
+        for change in backfill.link_geofences_and_costs(dry_run=True):
+            print(json.dumps({"dry_run": True, **change}, default=str))
+        stats = backfill.stats
+    else:
+        stats = backfill.run(merged)
     print(json.dumps(stats, indent=2, sort_keys=True))
     return 0
 

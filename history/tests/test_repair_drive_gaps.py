@@ -92,6 +92,10 @@ class _PsycopgStyleCursor:
     def __init__(self, cursor):
         self._cursor = cursor
 
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
     def execute(self, sql, params=()):
         self._cursor.execute(sql.replace("%s", "?"), params)
 
@@ -121,7 +125,12 @@ class RepairDriveGapsTest(unittest.TestCase):
                 usable_battery_level INTEGER, rated_battery_range_km REAL,
                 ideal_battery_range_km REAL);
             CREATE TABLE charging_processes (
-                id INTEGER PRIMARY KEY, car_id INTEGER, start_date TIMESTAMP, end_date TIMESTAMP);
+                id INTEGER PRIMARY KEY, car_id INTEGER, start_date TIMESTAMP, end_date TIMESTAMP,
+                position_id INTEGER, geofence_id INTEGER, cost REAL, charge_energy_used REAL,
+                charge_energy_added REAL, duration_min INTEGER);
+            CREATE TABLE geofences (
+                id INTEGER PRIMARY KEY, latitude REAL, longitude REAL, radius REAL,
+                billing_type TEXT, cost_per_unit REAL, session_fee REAL);
             """
         )
         self.cursor = _PsycopgStyleCursor(self.db.cursor())
@@ -218,6 +227,18 @@ class RepairDriveGapsTest(unittest.TestCase):
             (at(10, 18, 51, 10), 13.0, 10421.0, 2),
         )
 
+    def test_moved_drive_start_gets_the_geofence_of_its_new_position(self):
+        self.db.execute(
+            "INSERT INTO geofences (id, latitude, longitude, radius) VALUES (1, 13.0, 35.0, 50)"
+        )
+        for drive in EVENING_DRIVES:
+            self.drive(*drive)
+        self.db.execute("UPDATE drives SET start_geofence_id = 1 WHERE id IN (2, 3)")
+        self.repair(EVENINGS, EVENING_LOCATIONS)
+        self.assertEqual(
+            [self.row("drives", drive_id)["start_geofence_id"] for drive_id in (2, 3)], [1, None]
+        )
+
     def test_extended_start_takes_range_and_battery_in_effect_at_the_new_start(self):
         for drive in EVENING_DRIVES:
             self.drive(*drive)
@@ -247,7 +268,8 @@ class RepairDriveGapsTest(unittest.TestCase):
     def test_charge_that_ended_just_before_the_trip_moves_the_start_to_its_end(self):
         self.drive(*PREVIOUS_DRIVE)
         self.db.execute(
-            "INSERT INTO charging_processes VALUES (1, 1, ?, ?)", (at(11, 15), at(11, 16, 49, 11))
+            "INSERT INTO charging_processes (id, car_id, start_date, end_date) VALUES (1, 1, ?, ?)",
+            (at(11, 15), at(11, 16, 49, 11)),
         )
         repairs = self.repair(TRIP, TRIP_LOCATIONS)
         self.assertEqual([r["start_at"] for r in repairs], [at(11, 16, 49, 11)])
@@ -288,7 +310,10 @@ class RepairDriveGapsTest(unittest.TestCase):
     def test_orphan_with_one_position_and_a_later_charge_is_deleted(self):
         self.drive(5, at(9, 8), None, None, None)
         self.position(5, at(9, 8, 2), 10400.0)
-        self.db.execute("INSERT INTO charging_processes VALUES (1, 1, ?, NULL)", (at(9, 9),))
+        self.db.execute(
+            "INSERT INTO charging_processes (id, car_id, start_date, end_date) VALUES (1, 1, ?, NULL)",
+            (at(9, 9),),
+        )
         repairs = self.repair([])
         self.assertEqual([(r["kind"], r["drive_id"]) for r in repairs], [("deleted_orphan", 5)])
         self.assertIsNone(self.row("drives", 5))
@@ -347,7 +372,8 @@ class RepairDriveGapsTest(unittest.TestCase):
     def test_charging_session_flat_odometer_with_a_dip_creates_no_drive(self):
         self.drive(*PREVIOUS_DRIVE)
         self.db.execute(
-            "INSERT INTO charging_processes VALUES (1, 1, ?, ?)", (at(11, 15), at(11, 17))
+            "INSERT INTO charging_processes (id, car_id, start_date, end_date) VALUES (1, 1, ?, ?)",
+            (at(11, 15), at(11, 17)),
         )
         records = [
             (at(11, 15), "10487"),

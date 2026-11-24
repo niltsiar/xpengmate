@@ -15,7 +15,8 @@ every few minutes, until the export import confirms them in the repair row
 (``confirmed_start_at``, ``confirmed_end_at``). A moved drive end and each new
 position take the range and battery level in effect at their date from the
 optional HA sensors, else NULL; the old value of a moved end describes another
-moment. Each repair is a row in
+moment. A moved edge loses its address until the next backfill, and gets the geofence
+of its new position in the same transaction. Each repair is a row in
 ``xpengmate_drive_repairs``, so a rerun finds nothing new.
 
 Open drives with a later drive or charging process are closed first, from their
@@ -41,6 +42,7 @@ from urllib.parse import quote, urlencode
 
 import psycopg
 
+from backfill_teslamate import fill_geofences_and_costs
 from close_orphan_charges import duration_min
 
 _LOGGER = logging.getLogger("xpengmate.history.repair_drive_gaps")
@@ -455,6 +457,8 @@ def repair_gaps(
     if _first(cursor, "SELECT id FROM drives WHERE car_id = %s AND end_date IS NULL LIMIT 1",
               (car_id,)) is not None:
         _LOGGER.info("drive gap repair skipped car %s: a drive is in progress", car_id)
+        if repairs:
+            fill_geofences_and_costs(cursor, car_id)
         return repairs
     watermark = _first(
         cursor,
@@ -527,6 +531,8 @@ def repair_gaps(
         "drive gap repair for car %s: %d episodes, %.1f km in recorded drives, %.1f km repaired",
         car_id, len(episodes), covered_km, repaired_km,
     )
+    if repairs:
+        fill_geofences_and_costs(cursor, car_id)
     return repairs
 
 

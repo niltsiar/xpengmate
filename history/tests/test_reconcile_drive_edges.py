@@ -21,7 +21,12 @@ CREATE TABLE positions (
     usable_battery_level INTEGER, rated_battery_range_km REAL,
     ideal_battery_range_km REAL, est_battery_range_km REAL);
 CREATE TABLE charging_processes (
-    id INTEGER PRIMARY KEY, car_id INTEGER, start_date TIMESTAMP, end_date TIMESTAMP);
+    id INTEGER PRIMARY KEY, car_id INTEGER, start_date TIMESTAMP, end_date TIMESTAMP,
+    position_id INTEGER, geofence_id INTEGER, cost REAL, charge_energy_used REAL,
+    charge_energy_added REAL, duration_min INTEGER);
+CREATE TABLE geofences (
+    id INTEGER PRIMARY KEY, latitude REAL, longitude REAL, radius REAL,
+    billing_type TEXT, cost_per_unit REAL, session_fee REAL);
 CREATE TABLE xpengmate_drive_repairs (
     id INTEGER PRIMARY KEY, car_id INTEGER, drive_id INTEGER, kind TEXT, km_from REAL,
     km_to REAL, start_at TIMESTAMP, end_at TIMESTAMP, estimated BOOLEAN, created_at TIMESTAMP,
@@ -29,17 +34,11 @@ CREATE TABLE xpengmate_drive_repairs (
 """
 
 
-class _Cursor(_PsycopgStyleCursor):
-    @property
-    def rowcount(self):
-        return self._cursor.rowcount
-
-
 class ReconcileDriveEdgesTest(unittest.TestCase):
     def setUp(self):
         self.db = sqlite3.connect(":memory:", detect_types=sqlite3.PARSE_DECLTYPES)
         self.db.executescript(SCHEMA)
-        self.cursor = _Cursor(self.db.cursor())
+        self.cursor = _PsycopgStyleCursor(self.db.cursor())
         self.samples = {}
         self.asked = None
 
