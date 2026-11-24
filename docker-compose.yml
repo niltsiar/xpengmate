@@ -29,6 +29,10 @@ services:
       - XPENGMATE_ADMIN_TOKEN=${XPENG_PROVIDER_TOKEN:?set XPENG_PROVIDER_TOKEN in .env}
       - XPENGMATE_ENGINE_ADMIN_URL=http://engine:8202
       - XPENGMATE_HISTORY_URL=http://history:8100
+      # The export request card appears only when the dataact profile is enabled
+      # and both are set.
+      - XPENGMATE_DATAACT_URL=${XPENGMATE_DATAACT_URL:-}
+      - XPENGMATE_DATAACT_TOKEN=${XPENGMATE_DATAACT_TOKEN:-}
       # Distributed node, only so `docker exec ... bin/teslamate rpc` can drive
       # the provider sign-in without a browser (the sign-in is a LiveView form).
       - RELEASE_DISTRIBUTION=name
@@ -142,6 +146,8 @@ services:
     environment:
       - XPENGMATE_DATABASE_URL=postgresql://xpengmate:${DATABASE_PASS:?set DATABASE_PASS in .env}@database:5432/xpengmate
       - XPENGMATE_HISTORY_TOKEN=${XPENG_PROVIDER_TOKEN:?set XPENG_PROVIDER_TOKEN in .env}
+      # Accepted only on GET and POST /exports; used by the dataact service.
+      - XPENGMATE_HISTORY_UPLOAD_TOKEN=${XPENGMATE_HISTORY_UPLOAD_TOKEN:-}
       - XPENG_VIN=${XPENG_VIN:-}
       - XPENG_USABLE_BATTERY_KWH=${XPENG_USABLE_BATTERY_KWH:-87.5}
       - XPENG_CAR_NAME=${XPENG_CAR_NAME:-XPeng}
@@ -167,6 +173,52 @@ services:
     depends_on:
       - database
 
+  # Optional (profile "dataact"): requests the XPENG Data Act export for the
+  # car owner's account and uploads it to history. No published port: only the
+  # app reaches it.
+  dataact:
+    build: ./dataact
+    image: xpengmate-dataact:local
+    profiles: [dataact]
+    restart: unless-stopped
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - XPENGMATE_DATAACT_TOKEN=${XPENGMATE_DATAACT_TOKEN:-}
+      - XPENGMATE_HISTORY_URL=http://history:8100
+      - XPENGMATE_HISTORY_UPLOAD_TOKEN=${XPENGMATE_HISTORY_UPLOAD_TOKEN:-}
+      - SOLVER_URL=http://dataact-solver:8080
+      - SOLVER_TOKEN=${SOLVER_TOKEN:-}
+    volumes:
+      # A named volume: the image runs as user node, and a bind mount that
+      # Docker creates would belong to root.
+      - dataact-data:/data
+    healthcheck:
+      # The image has no curl.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8300/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      - dataact-solver
+      - history
+
+  # Solves the XPENG login slider for dataact. Internal only.
+  dataact-solver:
+    image: ghcr.io/xpengtoolkit/xpeng-slider-solver:0.1.2@sha256:2e02ca5f7beb5c497894f01ac61be662103b5450aa0845fcec02f86357ab2a12
+    profiles: [dataact]
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - SOLVER_TOKEN=${SOLVER_TOKEN:-}
+
   mosquitto:
     image: eclipse-mosquitto:2
     restart: always
@@ -181,3 +233,4 @@ volumes:
   srtm:
   mosquitto-conf:
   mosquitto-data:
+  dataact-data:

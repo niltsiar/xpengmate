@@ -246,6 +246,41 @@ Deliberately **not** imported: positions. The export has no coordinates, and the
 importer will not invent them. A zero-row result is normal when the windows are
 already covered — the card says so.
 
+## Requesting the XPENG export from the settings page
+
+The *Request the XPENG export* card on `/xpengmate` asks XPENG for the
+30-day data export itself. Enter the XPENG account email and password and
+click the button. The `dataact` service logs in to the XPENG Data Act portal,
+requests the export, waits until it is ready, downloads the zip and uploads it
+through the import path above. The card shows the current step.
+
+Requirements:
+
+* The car owner's XPENG account. Other accounts do not see the car.
+* The slider solver image (`ghcr.io/xpengtoolkit/xpeng-slider-solver`), which
+  the compose profile starts beside `dataact`.
+* HTTPS in front of the app, for example a reverse proxy that sets
+  `X-Forwarded-Proto`. The button refuses plain HTTP so the password never
+  crosses the network in clear.
+
+Enable it in `.env`, then start the stack with `COMPOSE_PROFILES=dataact` or
+`docker compose --profile dataact up -d`:
+
+```
+XPENGMATE_DATAACT_TOKEN=...            # openssl rand -hex 32
+XPENGMATE_HISTORY_UPLOAD_TOKEN=...     # openssl rand -hex 32
+SOLVER_TOKEN=...                       # openssl rand -hex 32
+XPENGMATE_DATAACT_URL=http://dataact:8300
+```
+
+Without `XPENGMATE_DATAACT_URL` the card is hidden and nothing else changes.
+
+* The service never stores the password, the session or the download link.
+  It also keeps them out of its logs.
+* After a failed login the service refuses a new request for 15 minutes.
+* If the upload to history fails, the service keeps the zip. The next click
+  uploads that zip first, without a new login.
+
 ## Filling TeslaMate's derived columns
 
 `history/backfill_teslamate.py` (run inside the history container) completes the

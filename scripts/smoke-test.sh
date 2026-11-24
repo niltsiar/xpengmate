@@ -52,6 +52,16 @@ if [[ -n "$TOKEN" ]]; then
   ok "history status"
 fi
 
+say "export request service"
+dataact_id="$(docker ps -q --filter label=com.docker.compose.service=dataact 2>/dev/null | head -n1 || true)"
+if [[ -n "$dataact_id" ]]; then
+  dstate="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$dataact_id")"
+  [[ "$dstate" == "healthy" ]] || fail "dataact health is $dstate"
+  ok "dataact healthy"
+else
+  echo "   (dataact not enabled)"
+fi
+
 say "app"
 code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/")"
 [[ "$code" == "200" || "$code" == "302" ]] || fail "app root returned $code"
