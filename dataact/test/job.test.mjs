@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { test } from 'node:test';
-import { CLUSTERS, JobError, LIMITS } from '../job.mjs';
+import { CLUSTERS, HOST_REFUSED, JobError, LIMITS } from '../job.mjs';
 import { EMAIL, PASSWORD, ZIP_BYTES, fakeHistory, fakePortal, record, setup } from './fakes.mjs';
 
 const OLD = 'DA20990101000000AAAA';
@@ -310,14 +310,23 @@ test('a Playwright-shaped error logs its scrubbed first line and leaves no secre
   }
 });
 
+function recordSleeps(env) {
+  const sleeps = [];
+  const sleep = env.clock.sleep;
+  env.clock.sleep = (ms, signal) => { sleeps.push(ms); return sleep(ms, signal); };
+  return sleeps;
+}
+
 const solverDown = attempt => { throw new JobError({ detail: 'the solver gave no answer', status: attempt === 1 ? 502 : 504 }); };
 
 test('a captcha solver that fails twice and then answers leads to a login', async () => {
   const env = setup({
     portal: fakePortal({ lists: [[], [record(NEW, 'AVAILABLE')]], solveCaptcha: attempt => { if (attempt < 3) solverDown(attempt); } }),
   });
+  const sleeps = recordSleeps(env);
   const status = await run(env);
   assert.equal(status.state, 'uploaded');
+  assert.deepEqual(sleeps, [LIMITS.captchaRetryMs, LIMITS.captchaRetryMs]);
   assert.equal(env.portal.calls.captcha, 3);
   assert.equal(env.portal.calls.login, 1);
   assert.equal(env.logs.filter(l => l.startsWith('captcha solver failed')).length, 2);
@@ -325,11 +334,42 @@ test('a captcha solver that fails twice and then answers leads to a login', asyn
 
 test('a captcha solver that fails three times ends failed at step captcha with no login', async () => {
   const env = setup({ portal: fakePortal({ solveCaptcha: solverDown }) });
+  const sleeps = recordSleeps(env);
   const status = await run(env);
+  assert.deepEqual(sleeps, [LIMITS.captchaRetryMs, LIMITS.captchaRetryMs]);
   assert.equal(status.state, 'failed');
   assert.equal(status.step, 'captcha');
   assert.equal(status.message, 'captcha solver failed: the solver gave no answer (HTTP 504)');
   assert.equal(env.portal.calls.captcha, 3);
   assert.equal(env.portal.calls.login, 0);
   assert.equal(env.runner.request({ email: EMAIL, password: PASSWORD }).reason, undefined);
+});
+
+async function secondJobAfter(firstDownload, limits) {
+  let downloads = 0;
+  const env = setup({
+    portal: fakePortal({
+      lists: [[record(OLD, 'AVAILABLE')]],
+      download: () => (downloads++ === 0 ? firstDownload() : Readable.from([ZIP_BYTES])),
+    }),
+    limits,
+  });
+  assert.equal((await run(env)).state, 'failed');
+  const status = await run(env);
+  return { env, status };
+}
+
+test('a deadline during the download leaves the record reusable by the next job', { timeout: 5000 }, async () => {
+  const { env, status } = await secondJobAfter(() => new Readable({ read() {} }), { deadlineMs: 50 });
+  assert.equal(status.state, 'uploaded');
+  assert.deepEqual(env.portal.calls.submit, []);
+  assert.deepEqual(env.portal.calls.download, [OLD, OLD]);
+  assert.deepEqual(env.history.calls.uploads, [`${OLD}.zip`]);
+});
+
+test('a refused download host leaves the record reusable by the next job', async () => {
+  const { env, status } = await secondJobAfter(() => { throw new JobError({ detail: HOST_REFUSED }); }, {});
+  assert.equal(status.state, 'uploaded');
+  assert.deepEqual(env.portal.calls.submit, []);
+  assert.deepEqual(env.portal.calls.download, [OLD, OLD]);
 });

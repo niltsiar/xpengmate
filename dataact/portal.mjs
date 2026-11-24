@@ -1,7 +1,7 @@
 // The XPENG Data Act portal driven through Playwright. The nextApi calls reuse the headers the page itself sends.
 import { Readable } from 'node:stream';
 import { chromium } from 'playwright-core';
-import { JobError, errorClass } from './job.mjs';
+import { HOST_REFUSED, JobError, errorClass } from './job.mjs';
 
 const PORTAL = 'https://www.xpeng.com/data-act/my-data';
 const API = '/nextApi/dataAct/myData/';
@@ -13,6 +13,7 @@ const allowedHost = host => ALLOWED_HOSTS.includes(host) || ALLOWED_SUFFIXES.som
 const WEB_CAPTCHA_ID = 'ee799838945f4771aa5d3dc9bea105d2';
 const API_HEADERS = ['language', 'languagecode', 'timezone', 'client-type', 'country'];
 // Only the slider gate code is known from the portal; every other code is reported as is.
+// It arrives on the email check or the slider check, before the v2/login answer exists.
 const LOGIN_CODES = new Map([[12040101, 'captcha refused']]);
 const LOGIN_OK = 200;
 const API_OK = 2000;
@@ -31,6 +32,7 @@ export function createPortal({ log, solverUrl, solverToken }) {
   let apiHeaders;
   let frontRedirect;
   let loginAnswer;
+  let gateAnswer;
   let logoutUrl;
 
   function unexpected(what, data) {
@@ -97,7 +99,7 @@ export function createPortal({ log, solverUrl, solverToken }) {
     const url = new URL(data.downloadUrl);
     if (url.protocol !== 'https:' || !allowedHost(url.hostname)) {
       log(`download link refused: ${url.protocol}//${url.hostname}`);
-      throw new JobError({ detail: 'the download link points to a host that is not allowed' });
+      throw new JobError({ detail: HOST_REFUSED });
     }
     try {
       const r = await fetch(url, { redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(5 * 60_000)]) });
@@ -166,6 +168,11 @@ export function createPortal({ log, solverUrl, solverToken }) {
           const json = await r.json().catch(() => null);
           loginAnswer = { status: r.status(), code: json?.code };
           log(`login answer: HTTP ${loginAnswer.status}, code ${codeText(json?.code)}`);
+        } else if (url.host.endsWith('.xpeng.com') && (url.pathname === '/api/web/v3/emailLogin/account' || url.pathname.includes('/drag/validate'))) {
+          const json = await r.json().catch(() => null);
+          const what = url.pathname.includes('/drag/validate') ? 'slider check' : 'email check';
+          log(`${what} answer: HTTP ${r.status()}, code ${codeText(json?.code)}`);
+          if (LOGIN_CODES.has(json?.code)) gateAnswer = { status: r.status(), code: json.code };
         } else if (url.host === 'www.xpeng.com' && url.pathname.startsWith('/webAuthSdk/') && !logoutUrl) {
           const json = await r.json().catch(() => null);
           const found = json?.logoutUrl ?? json?.data?.logoutUrl;
@@ -185,8 +192,9 @@ export function createPortal({ log, solverUrl, solverToken }) {
         await page.waitForURL(u => u.hostname === 'www.xpeng.com' && u.pathname.startsWith('/data-act/my-data'));
       } catch {
         signal.throwIfAborted();
-        if (!loginAnswer) throw new JobError({ detail: 'the login page did not finish' });
-        const { code, status } = loginAnswer;
+        const answer = loginAnswer ?? gateAnswer;
+        if (!answer) throw new JobError({ detail: 'the login page did not finish' });
+        const { code, status } = answer;
         throw new JobError({ detail: LOGIN_CODES.get(code) ?? 'login refused', status, code });
       }
       await page.waitForLoadState('networkidle').catch(() => {});

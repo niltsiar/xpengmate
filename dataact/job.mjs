@@ -13,7 +13,10 @@ export const LIMITS = {
   cooldownMs: 15 * 60_000,
   zipBytes: 200 * 1024 * 1024,
   captchaAttempts: 3,
+  captchaRetryMs: 5_000,
 };
+
+export const HOST_REFUSED = 'the download link points to a host that is not allowed';
 
 export const CLUSTERS = [
   'vehicle:dynamics', 'vehicle:driver_input', 'vehicle:powertrain',
@@ -147,6 +150,7 @@ async function runJob({ email, password, portal, history, clock, dataDir, limits
     } catch (e) {
       if (signal.aborted || attempt >= limits.captchaAttempts) throw e;
       log(`captcha solver failed (${errorClass(e)}), attempt ${attempt} of ${limits.captchaAttempts}: ${firstLine(e)}`);
+      await clock.sleep(limits.captchaRetryMs, signal);
     }
   }
 
@@ -194,7 +198,8 @@ async function runJob({ email, password, portal, history, clock, dataDir, limits
     try {
       await saveZip(await portal.download(recordNo, signal), dataDir, recordNo, limits.zipBytes, signal);
     } catch (e) {
-      failedDownloads.add(recordNo);
+      // An abort or a refused host says nothing about the record.
+      if (!signal.aborted && !(e instanceof JobError && e.detail === HOST_REFUSED)) failedDownloads.add(recordNo);
       throw e;
     }
   } finally {
