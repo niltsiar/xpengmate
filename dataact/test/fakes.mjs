@@ -28,16 +28,17 @@ function fakeClock() {
 }
 
 // `lists` are the answers of successive activities() calls; the last one repeats, an Error entry is thrown.
+// `solveCaptcha(attempt, signal)` may throw to fail that attempt.
 // `download` returns the zip stream for a record number; the default streams ZIP_BYTES.
 export function fakePortal({
   vehicles = [{ vinToken: 'TESTVINTOKEN', userType: 1 }], lists = [[]], login, loginSucceeded = true,
-  download = () => Readable.from([ZIP_BYTES]),
+  download = () => Readable.from([ZIP_BYTES]), solveCaptcha,
 } = {}) {
   const calls = { captcha: 0, login: 0, submit: [], download: [], logout: 0, close: 0 };
   let n = 0;
   return {
     calls,
-    solveCaptcha: async () => { calls.captcha++; return 'validate-token'; },
+    solveCaptcha: async signal => { calls.captcha++; if (solveCaptcha) await solveCaptcha(calls.captcha, signal); return 'validate-token'; },
     login: async (args, signal) => { calls.login++; if (login) await login(args, signal); },
     loginSucceeded: () => loginSucceeded,
     vehicles: async () => vehicles,

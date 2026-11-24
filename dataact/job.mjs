@@ -12,6 +12,7 @@ export const LIMITS = {
   uploadWaitMs: 10 * 60_000,
   cooldownMs: 15 * 60_000,
   zipBytes: 200 * 1024 * 1024,
+  captchaAttempts: 3,
 };
 
 export const CLUSTERS = [
@@ -138,7 +139,16 @@ async function runJob({ email, password, portal, history, clock, dataDir, limits
   const imported = new Set((pre.body.imports ?? []).map(i => i.filename));
 
   setStep('captcha');
-  const validate = await portal.solveCaptcha(signal);
+  let validate;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      validate = await portal.solveCaptcha(signal);
+      break;
+    } catch (e) {
+      if (signal.aborted || attempt >= limits.captchaAttempts) throw e;
+      log(`captcha solver failed (${errorClass(e)}), attempt ${attempt} of ${limits.captchaAttempts}: ${firstLine(e)}`);
+    }
+  }
 
   let recordNo;
   try {

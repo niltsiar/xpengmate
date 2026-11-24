@@ -309,3 +309,27 @@ test('a Playwright-shaped error logs its scrubbed first line and leaves no secre
     assert.equal(stored.includes(leak), false, `status.json holds ${leak}`);
   }
 });
+
+const solverDown = attempt => { throw new JobError({ detail: 'the solver gave no answer', status: attempt === 1 ? 502 : 504 }); };
+
+test('a captcha solver that fails twice and then answers leads to a login', async () => {
+  const env = setup({
+    portal: fakePortal({ lists: [[], [record(NEW, 'AVAILABLE')]], solveCaptcha: attempt => { if (attempt < 3) solverDown(attempt); } }),
+  });
+  const status = await run(env);
+  assert.equal(status.state, 'uploaded');
+  assert.equal(env.portal.calls.captcha, 3);
+  assert.equal(env.portal.calls.login, 1);
+  assert.equal(env.logs.filter(l => l.startsWith('captcha solver failed')).length, 2);
+});
+
+test('a captcha solver that fails three times ends failed at step captcha with no login', async () => {
+  const env = setup({ portal: fakePortal({ solveCaptcha: solverDown }) });
+  const status = await run(env);
+  assert.equal(status.state, 'failed');
+  assert.equal(status.step, 'captcha');
+  assert.equal(status.message, 'captcha solver failed: the solver gave no answer (HTTP 504)');
+  assert.equal(env.portal.calls.captcha, 3);
+  assert.equal(env.portal.calls.login, 0);
+  assert.equal(env.runner.request({ email: EMAIL, password: PASSWORD }).reason, undefined);
+});
