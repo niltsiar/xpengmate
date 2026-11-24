@@ -1,12 +1,20 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { test } from 'node:test';
-import { CLUSTERS, LIMITS } from '../job.mjs';
+import { CLUSTERS, JobError, LIMITS } from '../job.mjs';
 import { EMAIL, PASSWORD, ZIP_BYTES, fakeHistory, fakePortal, record, setup } from './fakes.mjs';
 
 const OLD = 'DA20990101000000AAAA';
 const NEW = 'DA20990101000000BBBB';
+// VIN-shaped: a real VIN has no I, O or Q, so the scrubber pattern does not match the plain TESTVIN.
+const VIN = 'LTESTVEH000000001';
+
+async function until(check) {
+  while (!check()) await new Promise(r => setImmediate(r));
+}
 
 async function run(env) {
   const result = env.runner.request({ email: EMAIL, password: PASSWORD });
@@ -70,13 +78,159 @@ test('fails at step wait when the export is not ready within the poll cap', { ti
   assert.equal(env.portal.calls.logout, 1);
 });
 
-test('fails with the current step when the job deadline passes', { timeout: 5000 }, async () => {
-  const env = setup({ portal: fakePortal({ login: () => new Promise(() => {}) }), limits: { deadlineMs: 50 } });
-  const status = await run(env);
+test('a deadline during a slow login holds the slot until the login returns, and the job never submits', { timeout: 5000 }, async () => {
+  let loginSignal;
+  let release;
+  const env = setup({
+    portal: fakePortal({ login: (_, signal) => { loginSignal = signal; return new Promise(r => { release = r; }); } }),
+    limits: { deadlineMs: 20 },
+  });
+  const first = env.runner.request({ email: EMAIL, password: PASSWORD });
+  await until(() => loginSignal?.aborted);
+  assert.equal(env.runner.request({ email: EMAIL, password: PASSWORD }).reason, 'running');
+  assert.equal(env.runner.status().state, 'running');
+  release();
+  await first.done;
+  const status = env.runner.status();
   assert.equal(status.state, 'failed');
   assert.equal(status.step, 'login');
   assert.equal(status.message, 'XPENG login failed: the job passed its time limit');
+  assert.deepEqual(env.portal.calls.submit, []);
   assert.equal(env.portal.calls.close, 1);
+  assert.equal(env.runner.request({ email: EMAIL, password: PASSWORD }).reason, 'cooldown');
+});
+
+test('an upload that history accepts after the deadline ends as uploaded', { timeout: 5000 }, async () => {
+  const env = setup({
+    history: fakeHistory({ upload: signal => until(() => signal.aborted) }),
+    limits: { deadlineMs: 20 },
+  });
+  writeFileSync(join(env.dataDir, `${OLD}.zip`), ZIP_BYTES);
+  const status = await run(env);
+  assert.equal(status.state, 'uploaded');
+  assert.equal(existsSync(join(env.dataDir, `${OLD}.zip`)), false);
+});
+
+test('a failed login answer starts the cooldown even when the job fails at a later step', async () => {
+  const env = setup({ portal: fakePortal({ loginSucceeded: false, vehicles: [] }) });
+  const status = await run(env);
+  assert.equal(status.step, 'vehicles');
+  assert.equal(env.runner.request({ email: EMAIL, password: PASSWORD }).reason, 'cooldown');
+});
+
+test('a second job after a failed download submits a new record instead of reusing the old one', async () => {
+  const env = setup({
+    portal: fakePortal({
+      lists: [[record(OLD, 'AVAILABLE')], [record(OLD, 'AVAILABLE')], [record(OLD, 'DOWNLOADED')],
+        [record(OLD, 'DOWNLOADED'), record(NEW, 'AVAILABLE')]],
+      download: no => (no === OLD ? Readable.from([Buffer.from('<html>expired</html>')]) : Readable.from([ZIP_BYTES])),
+    }),
+  });
+  assert.equal((await run(env)).state, 'failed');
+  const status = await run(env);
+  assert.equal(status.state, 'uploaded');
+  assert.equal(env.portal.calls.submit.length, 1);
+  assert.deepEqual(env.portal.calls.download, [OLD, NEW]);
+  assert.deepEqual(env.history.calls.uploads, [`${NEW}.zip`]);
+});
+
+test('an export over the size cap fails at step download and leaves no zip and no part file', async () => {
+  const env = setup({
+    portal: fakePortal({
+      lists: [[record(OLD, 'AVAILABLE')]],
+      download: () => Readable.from([ZIP_BYTES, Buffer.alloc(64)]),
+    }),
+    limits: { zipBytes: 32 },
+  });
+  const status = await run(env);
+  assert.equal(status.state, 'failed');
+  assert.equal(status.message, `export download failed: the export is larger than ${32 / 2 ** 20} MB`);
+  assert.deepEqual(env.portal.calls.download, [OLD]);
+  assert.deepEqual(readdirSync(env.dataDir), ['status.json']);
+});
+
+test('a download that is not a zip fails at step download and leaves no zip and no part file', async () => {
+  const env = setup({
+    portal: fakePortal({
+      lists: [[record(OLD, 'AVAILABLE')]],
+      download: () => Readable.from([Buffer.from('<html>login</html>')]),
+    }),
+  });
+  const status = await run(env);
+  assert.equal(status.message, 'export download failed: the download is not a zip');
+  assert.deepEqual(env.portal.calls.download, [OLD]);
+  assert.deepEqual(readdirSync(env.dataDir), ['status.json']);
+});
+
+test('polling survives three record list errors in a row', async () => {
+  const error = new JobError({ detail: 'the portal gave an unexpected answer', status: 502 });
+  const env = setup({ portal: fakePortal({ lists: [[], error, error, error, [record(NEW, 'AVAILABLE')]] }) });
+  const status = await run(env);
+  assert.equal(status.state, 'uploaded');
+});
+
+test('polling fails at the fourth record list error in a row', async () => {
+  const error = new JobError({ detail: 'the portal gave an unexpected answer', status: 502 });
+  const env = setup({ portal: fakePortal({ lists: [[], error, error, error, error, [record(NEW, 'AVAILABLE')]] }) });
+  const status = await run(env);
+  assert.equal(status.state, 'failed');
+  assert.equal(status.message, 'wait for the export failed: the portal gave an unexpected answer (HTTP 502)');
+});
+
+test('a kept zip is uploaded during the login cooldown without a login', async () => {
+  const env = setup({ portal: fakePortal({ login: async () => { throw new JobError({ detail: 'login refused' }); } }) });
+  assert.equal((await run(env)).step, 'login');
+  writeFileSync(join(env.dataDir, `${OLD}.zip`), ZIP_BYTES);
+  const status = await run(env);
+  assert.equal(status.state, 'uploaded');
+  assert.equal(env.portal.calls.login, 1);
+});
+
+test('fails before the solver and the login when history could not list its imports', async () => {
+  const env = setup({ history: fakeHistory({ error: 'connection refused' }) });
+  const status = await run(env);
+  assert.equal(status.message, 'history service check failed: history could not list its imports');
+  assert.equal(env.portal.calls.captcha, 0);
+});
+
+test('fails before the solver and the login while history is busy', async () => {
+  const env = setup({ history: fakeHistory({ busy: [true] }) });
+  const status = await run(env);
+  assert.equal(status.message, 'history service check failed: history is busy with a sync or an import');
+  assert.equal(env.portal.calls.captcha, 0);
+});
+
+test('waits while history is busy before the upload', async () => {
+  const env = setup({
+    portal: fakePortal({ lists: [[record(OLD, 'AVAILABLE')]] }),
+    history: fakeHistory({ busy: [false, true, false] }),
+  });
+  const status = await run(env);
+  assert.equal(status.state, 'uploaded');
+  assert.equal(env.history.calls.exports, 3);
+});
+
+test('does not reuse a ready record without a valid expiry time', async () => {
+  const env = setup({
+    portal: fakePortal({ lists: [[record(OLD, 'AVAILABLE', { expireTime: 'soon' })], [record(NEW, 'AVAILABLE')]] }),
+  });
+  const status = await run(env);
+  assert.equal(status.record_no, NEW);
+  assert.equal(env.portal.calls.submit.length, 1);
+});
+
+test('removes partial downloads when the runner starts', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'dataact-test-'));
+  writeFileSync(join(dataDir, `${OLD}.zip.part`), ZIP_BYTES);
+  const env = setup({ dataDir });
+  assert.deepEqual(readdirSync(env.dataDir), []);
+  assert.deepEqual(env.logs, [`removed the partial download ${OLD}.zip.part`]);
+});
+
+test('logs out after a failed login', async () => {
+  const env = setup({ portal: fakePortal({ login: async () => { throw new JobError({ detail: 'login refused' }); } }) });
+  await run(env);
+  assert.equal(env.portal.calls.logout, 1);
 });
 
 test('uploads a kept local zip before any login', { timeout: 5000 }, async () => {
@@ -121,14 +275,14 @@ test('fails with the reason when the account has more than one owner vehicle', a
   assert.deepEqual(env.portal.calls.submit, []);
 });
 
-test('a Playwright-shaped error with credentials and a signed URL leaves no trace in the log or status.json', async () => {
+test('a Playwright-shaped error logs its scrubbed first line and leaves no secret in the log or status.json', async () => {
   const signed = 'https://oss.example.test/export/x.zip?Expires=4070908800&OSSAccessKeyId=STS.KEYID&Signature=SECRETSIG&security-token=STSTOKEN';
   const env = setup({
     portal: fakePortal({
       login: () => {
         env.portal.log(`request body email=${encodeURIComponent(EMAIL)}&password=${encodeURIComponent(PASSWORD)} to ${signed}`);
         const e = new Error([
-          'locator.fill: Timeout 30000ms exceeded.',
+          `page.goto: net::ERR_ABORTED at ${signed} for ${EMAIL} ${PASSWORD} ${VIN}`,
           'Call log:',
           `  - fill(${JSON.stringify(PASSWORD)}) on input for ${EMAIL}`,
           `  - navigating to "${signed}", waiting until "load"`,
@@ -143,10 +297,13 @@ test('a Playwright-shaped error with credentials and a signed URL leaves no trac
   assert.equal(status.message, 'XPENG login failed');
   const logText = env.logs.join('\n');
   assert.match(logText, /oss\.example\.test\/export\/x\.zip/);
-  assert.match(logText, /job failed at step login \(Error\)/);
+  assert.ok(env.logs.includes(
+    'job failed at step login (Error): page.goto: net::ERR_ABORTED at oss.example.test/export/x.zip for <cut> <cut> <vin>',
+  ), logText);
+  assert.equal(logText.includes('Call log'), false);
   const stored = readFileSync(join(env.dataDir, 'status.json'), 'utf8');
   const leaks = [EMAIL, PASSWORD, encodeURIComponent(EMAIL), encodeURIComponent(PASSWORD),
-    JSON.stringify(PASSWORD).slice(1, -1), 'SECRETSIG', 'STSTOKEN', 'STS.KEYID', 'Expires='];
+    JSON.stringify(PASSWORD).slice(1, -1), 'SECRETSIG', 'STSTOKEN', 'STS.KEYID', 'Expires=', VIN];
   for (const leak of leaks) {
     assert.equal(logText.includes(leak), false, `log holds ${leak}`);
     assert.equal(stored.includes(leak), false, `status.json holds ${leak}`);

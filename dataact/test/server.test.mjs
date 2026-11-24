@@ -25,27 +25,32 @@ async function until(check) {
   while (!check()) await new Promise(r => setImmediate(r));
 }
 
-test('answers 409 while a job runs', async t => {
+test('answers 409 with reason running while a job runs', async t => {
   let release;
   const env = setup({ portal: fakePortal({ login: () => new Promise(r => { release = r; }) }) });
   const call = await serve(env, t);
   assert.equal((await call('/request', { body: { email: EMAIL, password: PASSWORD } })).status, 202);
-  const second = await call('/request', { body: { email: EMAIL, password: PASSWORD } });
-  assert.deepEqual(second, { status: 409, json: { error: 'an export request is already running' } });
-  await until(() => release);
-  release();
-  await until(() => env.runner.status().state !== 'running');
+  try {
+    const second = await call('/request', { body: { email: EMAIL, password: PASSWORD } });
+    assert.deepEqual(second, { status: 409, json: { error: 'an export request is already running', reason: 'running' } });
+  } finally {
+    await until(() => release);
+    release();
+    await until(() => env.runner.status().state !== 'running');
+  }
 });
 
-test('answers 409 during the cooldown after a failed login', async t => {
+test('answers 409 with reason cooldown after a failed login', async t => {
   const env = setup({ portal: fakePortal({ login: async () => { throw new JobError({ detail: 'login refused', code: 99 }); } }) });
   const call = await serve(env, t);
   assert.equal((await call('/request', { body: { email: EMAIL, password: PASSWORD } })).status, 202);
   await until(() => env.runner.status().state !== 'running');
   assert.equal(env.runner.status().message, 'XPENG login failed: login refused (code 99)');
   const second = await call('/request', { body: { email: EMAIL, password: PASSWORD } });
-  assert.equal(second.status, 409);
-  assert.match(second.json.error, /^a login failed; try again after 2099-01-01T00:15:00\.000Z$/);
+  assert.deepEqual(second, {
+    status: 409,
+    json: { error: 'a login failed; try again after 2099-01-01T00:15:00.000Z', reason: 'cooldown' },
+  });
   assert.equal(env.portal.calls.login, 1);
 });
 

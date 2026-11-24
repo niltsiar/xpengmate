@@ -1,6 +1,7 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { CLUSTERS, LIMITS, createRunner } from '../job.mjs';
 
 export const EMAIL = 'owner@example.test';
@@ -14,42 +15,62 @@ export const record = (recordNo, status, extra = {}) => ({
 });
 
 function fakeClock() {
-  const clock = { t: T0, now: () => clock.t, sleep: ms => { clock.t += ms; return new Promise(r => setImmediate(r)); } };
+  const clock = {
+    t: T0,
+    now: () => clock.t,
+    sleep: async (ms, signal) => {
+      signal.throwIfAborted();
+      clock.t += ms;
+      await new Promise(r => setImmediate(r));
+    },
+  };
   return clock;
 }
 
-// `lists` are the answers of successive activities() calls; the last one repeats.
-export function fakePortal({ vehicles = [{ vinToken: 'TESTVINTOKEN', userType: 1 }], lists = [[]], login } = {}) {
+// `lists` are the answers of successive activities() calls; the last one repeats, an Error entry is thrown.
+// `download` returns the zip stream for a record number; the default streams ZIP_BYTES.
+export function fakePortal({
+  vehicles = [{ vinToken: 'TESTVINTOKEN', userType: 1 }], lists = [[]], login, loginSucceeded = true,
+  download = () => Readable.from([ZIP_BYTES]),
+} = {}) {
   const calls = { captcha: 0, login: 0, submit: [], download: [], logout: 0, close: 0 };
   let n = 0;
   return {
     calls,
     solveCaptcha: async () => { calls.captcha++; return 'validate-token'; },
-    login: async args => { calls.login++; if (login) await login(args); },
+    login: async (args, signal) => { calls.login++; if (login) await login(args, signal); },
+    loginSucceeded: () => loginSucceeded,
     vehicles: async () => vehicles,
-    activities: async () => lists[Math.min(n++, lists.length - 1)],
-    submit: async args => { calls.submit.push(args); return 'DA20990101000000BBBB'; },
-    downloadZip: async (rec, dir) => {
-      calls.download.push(rec.recordNo);
-      writeFileSync(join(dir, `${rec.recordNo}.zip`), ZIP_BYTES);
+    activities: async () => {
+      const list = lists[Math.min(n++, lists.length - 1)];
+      if (list instanceof Error) throw list;
+      return list;
     },
+    submit: async args => { calls.submit.push(args); return 'DA20990101000000BBBB'; },
+    download: async recordNo => { calls.download.push(recordNo); return download(recordNo); },
     logout: async () => { calls.logout++; },
     close: async () => { calls.close++; },
   };
 }
 
-export function fakeHistory({ imports = [], running = [false], vinSet = true, uploadStatus = 200 } = {}) {
-  const calls = { uploads: [] };
-  let n = 0;
+// `busy` are the answers of successive exports() calls; the last one repeats.
+export function fakeHistory({ imports = [], busy = [false], vinSet = true, error, uploadStatus = 200, upload } = {}) {
+  const calls = { exports: 0, uploads: [] };
   return {
     calls,
-    exports: async () => ({ status: 200, body: { ok: true, running: running[Math.min(n++, running.length - 1)], vin_set: vinSet, imports } }),
-    upload: async (path, name) => { calls.uploads.push(name); return { status: uploadStatus }; },
+    exports: async () => {
+      const body = { ok: true, busy: busy[Math.min(calls.exports++, busy.length - 1)], vin_set: vinSet, imports };
+      return { status: 200, body: error ? { ...body, error } : body };
+    },
+    upload: async (path, name, signal) => {
+      calls.uploads.push(name);
+      if (upload) await upload(signal);
+      return { status: uploadStatus };
+    },
   };
 }
 
-export function setup({ portal = fakePortal(), history = fakeHistory(), limits = {} } = {}) {
-  const dataDir = mkdtempSync(join(tmpdir(), 'dataact-test-'));
+export function setup({ portal = fakePortal(), history = fakeHistory(), limits = {}, dataDir = mkdtempSync(join(tmpdir(), 'dataact-test-')) } = {}) {
   const logs = [];
   const clock = fakeClock();
   const runner = createRunner({

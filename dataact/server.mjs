@@ -57,7 +57,7 @@ export function createServer({ token, runner, log }) {
     if (!email.trim() || !password) return send(400, { error: 'email and password are required' });
 
     const result = runner.request({ email: email.trim(), password });
-    if (result.conflict) return send(409, { error: result.conflict });
+    if (result.conflict) return send(409, { error: result.conflict, reason: result.reason });
     return send(202, runner.status());
   });
 }
@@ -66,16 +66,16 @@ function historyClient(baseUrl, token) {
   const headers = { authorization: `Bearer ${token}` };
   const base = (baseUrl ?? '').replace(/\/$/, '');
   return {
-    async exports() {
+    async exports(signal) {
       if (!base) throw new JobError({ detail: 'the history URL is not configured' });
-      const r = await fetch(`${base}/exports`, { headers, signal: AbortSignal.timeout(30_000) });
+      const r = await fetch(`${base}/exports`, { headers, signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) });
       return { status: r.status, body: r.ok ? await r.json() : null };
     },
-    async upload(path, name) {
+    async upload(path, name, signal) {
       const form = new FormData();
       form.append('file', await openAsBlob(path, { type: 'application/zip' }), name);
       const r = await fetch(`${base}/exports`, {
-        method: 'POST', headers, body: form, signal: AbortSignal.timeout(10 * 60_000),
+        method: 'POST', headers, body: form, signal: AbortSignal.any([signal, AbortSignal.timeout(10 * 60_000)]),
       });
       await r.body?.cancel();
       return { status: r.status };
@@ -95,7 +95,7 @@ function main() {
     dataDir: env.DATA_DIR || '/data',
     history: historyClient(env.XPENGMATE_HISTORY_URL, env.XPENGMATE_HISTORY_UPLOAD_TOKEN ?? ''),
     createPortal: jobLog => createPortal({ log: jobLog, solverUrl: env.SOLVER_URL, solverToken: env.SOLVER_TOKEN ?? '' }),
-    clock: { now: Date.now, sleep },
+    clock: { now: Date.now, sleep: (ms, signal) => sleep(ms, undefined, { signal }) },
     log,
   });
   process.on('uncaughtException', e => runner.crash(e));
