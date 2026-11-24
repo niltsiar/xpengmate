@@ -108,6 +108,7 @@ class Importer:
         self.tyre_updates = 0
         self.enriched = 0
         self.drive_energies = 0
+        self.enrich_failed: list[str] = []
 
     # -- schema / bookkeeping ---------------------------------
 
@@ -521,7 +522,9 @@ class Importer:
                     self.drive_energies += export_enrich.store_drive_energy(
                         self.store, data.path, data.timer_start, data.timer_end
                     )
-            except Exception:  # noqa: BLE001 - enrichment is additive
+            except Exception:  # noqa: BLE001 - one zip must not stop the others
+                self.conn.rollback()
+                self.enrich_failed.append(Path(data.path).name)
                 _LOGGER.warning("could not enrich from %s", data.path, exc_info=True)
 
     # -- finish -----------------------------------------------
@@ -538,6 +541,7 @@ class Importer:
             "tyre_positions": self.tyre_updates,
             "enriched_positions": self.enriched,
             "drive_energies": self.drive_energies,
+            "enrich_failed": self.enrich_failed,
             "files": self.imports,
         }
 
@@ -572,14 +576,16 @@ def import_exports(
             importer.import_tyres(merged.tyres)
         # Every zip given, so a zip imported before gets the current enrichment and energy rules.
         importer.enrich_from(every.files)
-        # Recorded only after the rows landed, so a failed import can be retried.
+        # Recorded only after the rows and the enrichment landed, so a failed import can be retried.
         for path in fresh:
+            if Path(path).name in importer.enrich_failed:
+                continue
             data = next(item for item in every.files if item.path == path)
             importer.record_file(data, file_sha256(path), os.path.getsize(path))
         summary = importer.summary()
         summary.update(
             {
-                "ok": True,
+                "ok": not importer.enrich_failed,
                 "duplicates": len(paths) - len(fresh),
                 "files_imported": len(fresh),
                 "reconciled": reconciled,
@@ -627,7 +633,7 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps(summary, indent=2, default=str))
     # A single line the service can find unambiguously in the log stream.
     print("EXPORT_IMPORT_SUMMARY " + json.dumps(summary, default=str))
-    return 0
+    return 0 if summary["ok"] else 1
 
 
 if __name__ == "__main__":

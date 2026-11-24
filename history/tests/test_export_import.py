@@ -1,10 +1,16 @@
+import contextlib
+import io
+import os
 import sqlite3
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from unittest import mock
 
+import export_enrich
 import export_import
-from export_parser import Drive
+import reconcile_drive_edges
+from export_parser import Drive, ExportData, MergedExport
 
 
 def epoch(hour, minute=0, second=0):
@@ -32,14 +38,20 @@ class _Cursor:
 
 
 class _Connection:
-    def __init__(self, db):
+    def __init__(self, db, events=None):
         self.db = db
+        self.events = events if events is not None else []
 
     def cursor(self):
         return _Cursor(self.db.cursor())
 
     def commit(self):
+        self.events.append("commit")
         self.db.commit()
+
+    def rollback(self):
+        self.events.append("rollback")
+        self.db.rollback()
 
 
 class _Store:
@@ -47,9 +59,13 @@ class _Store:
         self.db = sqlite3.connect(":memory:")
         self.conn = _Connection(self.db)
         self.car_id = 1
+        self.vin = vin
 
     def remember(self, kind, key, target_id):
         self.db.execute("INSERT INTO xpengmate_import VALUES (?, ?, ?)", (kind, key, target_id))
+
+    def close(self):
+        pass
 
 
 class ImportDrivesTest(unittest.TestCase):
@@ -86,6 +102,92 @@ class ImportDrivesTest(unittest.TestCase):
 
         self.assertEqual(drives, [(5000.0, 5004.0), (5004.0, 5019.0)])
         self.assertEqual((self.importer.added_drives, self.importer.skipped_drives), (1, 1))
+
+
+class ImportExportsTest(unittest.TestCase):
+    """The import flow with the database and the parsing replaced by small fakes."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.paths = []
+        for name in ("a.zip", "b.zip"):
+            path = os.path.join(directory.name, name)
+            with open(path, "wb") as handle:
+                handle.write(name.encode())
+            self.paths.append(path)
+        self.db = sqlite3.connect(":memory:")
+        self.db.create_function("now", 0, lambda: "now")
+        self.db.executescript(
+            """
+            CREATE TABLE xpengmate_export_imports (
+                filename TEXT PRIMARY KEY, sha256 TEXT UNIQUE, vin TEXT, filesize INTEGER,
+                timer_start INTEGER, timer_end INTEGER, samples INTEGER, drives INTEGER,
+                charges INTEGER, tyre_hours INTEGER, imported_at TEXT);
+            """
+        )
+        self.events = []
+        self.inserts = mock.Mock()
+        self.enrich = mock.Mock(return_value=0)
+        self.energy = mock.Mock(return_value=0)
+
+        def make_store(dsn, vin, usable_kwh):
+            store = _Store(dsn, vin, usable_kwh)
+            store.db = self.db
+            store.conn = _Connection(self.db, self.events)
+            return store
+
+        def reconcile(cursor, car_id, trips, samples_for):
+            self.events.append("reconcile")
+            return {"changed": [], "skipped": [], "positions_moved": 0}
+
+        def parse_files(paths):
+            return MergedExport(files=[ExportData(path=path, samples=1) for path in paths])
+
+        for patch in (
+            mock.patch.object(export_import, "Store", make_store),
+            mock.patch.object(export_import.Importer, "prepare", lambda importer: None),
+            mock.patch.object(export_import.Importer, "existing_windows", lambda importer, *args: []),
+            mock.patch.object(export_import.Importer, "import_drives", self.inserts),
+            mock.patch.object(export_import.Importer, "import_charges", self.inserts),
+            mock.patch.object(export_import.Importer, "import_states", self.inserts),
+            mock.patch.object(export_import.Importer, "import_tyres", self.inserts),
+            mock.patch.object(export_import, "parse_files", parse_files),
+            mock.patch.object(reconcile_drive_edges, "reconcile", reconcile),
+            mock.patch.object(export_enrich, "enrich", self.enrich),
+            mock.patch.object(export_enrich, "store_drive_energy", self.energy),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def recorded(self):
+        return [row[0] for row in self.db.execute("SELECT filename FROM xpengmate_export_imports ORDER BY filename")]
+
+    def run_import(self, **options):
+        return export_import.import_exports("", "", 87.5, self.paths, **options)
+
+    def test_a_zip_whose_enrichment_fails_is_not_recorded_and_the_run_is_not_ok(self):
+        def enrich(store, path):
+            if path.endswith("b.zip"):
+                raise RuntimeError("enrichment failed")
+            return 0
+
+        self.enrich.side_effect = enrich
+
+        with self.assertLogs("xpengmate.export_import", "WARNING"):
+            summary = self.run_import()
+
+        self.assertFalse(summary["ok"])
+        self.assertEqual(summary["enrich_failed"], ["b.zip"])
+        self.assertEqual(self.recorded(), ["a.zip"])
+        self.assertIn("rollback", self.events)
+
+    def test_the_command_exits_1_when_the_import_is_not_ok(self):
+        for ok, code in ((True, 0), (False, 1)):
+            with mock.patch.object(export_import, "import_exports", return_value={"ok": ok}):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    result = export_import.main(["--database-url", "x", "--vin", "v", "a.zip"])
+            self.assertEqual(result, code)
 
 
 if __name__ == "__main__":
