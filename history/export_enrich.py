@@ -18,7 +18,6 @@ delivered and the energy regeneration returned, summed second by second.
 from __future__ import annotations
 
 import csv
-import heapq
 import io
 import logging
 import math
@@ -29,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
-from export_parser import CURRENT_SNA, MAX_STEP_SECONDS, VOLT_SNA
+from export_parser import MAX_STEP_SECONDS, clean_current, clean_volt
 
 _LOGGER = logging.getLogger("xpengmate.export")
 
@@ -183,8 +182,8 @@ def clean_sample(sample: dict) -> tuple[int | None, float | None, float | None]:
 
 def power_kw(sample: dict) -> float | None:
     """Pack voltage x current: positive while the battery discharges, negative while it charges."""
-    volt, amp = sample.get("volt"), sample.get("amp")
-    if volt is None or amp is None or volt <= 0 or volt >= VOLT_SNA or abs(amp) >= CURRENT_SNA:
+    volt, amp = clean_volt(sample.get("volt")), clean_current(sample.get("amp"))
+    if volt is None or amp is None:
         return None
     return volt * amp / 1000.0
 

@@ -112,13 +112,13 @@ def _clean_range(value: float | None) -> float | None:
     return round(value, 1)
 
 
-def _clean_volt(value: float | None) -> float | None:
+def clean_volt(value: float | None) -> float | None:
     if value is None or value <= 0 or value >= VOLT_SNA:
         return None
     return value
 
 
-def _clean_current(value: float | None) -> float | None:
+def clean_current(value: float | None) -> float | None:
     if value is None or abs(value) >= CURRENT_SNA:
         return None
     return value
@@ -358,8 +358,8 @@ def parse_zip(zip_path: str) -> ExportData:
         odometer = _clean_odometer(values.get("odometer"))
         soc = _clean_soc(values.get("soc"))
         range_km = _clean_range(values.get("range"))
-        volt = _clean_volt(values.get("volt"))
-        amp = _clean_current(values.get("amp"))
+        volt = clean_volt(values.get("volt"))
+        amp = clean_current(values.get("amp"))
         charge_power = _clean_charge_power(values.get("charge_power"))
         power_kw = None
         if volt is not None and amp is not None:
