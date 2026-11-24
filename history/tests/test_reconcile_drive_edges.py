@@ -41,6 +41,7 @@ class ReconcileDriveEdgesTest(unittest.TestCase):
         self.db.executescript(SCHEMA)
         self.cursor = _Cursor(self.db.cursor())
         self.samples = {}
+        self.asked = None
 
     # -- fixtures ---------------------------------------------
 
@@ -55,8 +56,8 @@ class ReconcileDriveEdgesTest(unittest.TestCase):
     def position(self, drive_id, moment, odometer, speed=None):
         return self.db.execute(
             "INSERT INTO positions (car_id, drive_id, date, latitude, longitude, speed, odometer,"
-            " battery_level, rated_battery_range_km, ideal_battery_range_km)"
-            " VALUES (1, ?, ?, 12.0, 34.0, ?, ?, 60, 300.0, 300.0)",
+            " battery_level, usable_battery_level, rated_battery_range_km, ideal_battery_range_km)"
+            " VALUES (1, ?, ?, 12.0, 34.0, ?, ?, 60, 60, 300.0, 300.0)",
             (drive_id, moment, speed, odometer),
         ).lastrowid
 
@@ -92,11 +93,23 @@ class ReconcileDriveEdgesTest(unittest.TestCase):
         self.position(drive_id, new_end, end_km)
         self.repair(drive_id, "extended_end", old_end, new_end)
 
+    def extended_end_drive(self, drive_id, start, live_end, guess_end, start_km, end_km):
+        """A live drive the repair job moved on from ``live_end`` to ``guess_end``."""
+        self.drive(drive_id, start, guess_end, start_km, end_km)
+        self.position(drive_id, start, start_km, speed=50)
+        self.position(drive_id, live_end, end_km - 2, speed=50)
+        self.position(drive_id, guess_end, end_km)
+        self.repair(drive_id, "extended_end", live_end, guess_end)
+
     def sample(self, moment, soc, odometer, range_km):
         self.samples[moment] = (soc, odometer, range_km)
 
     def reconcile(self, *trips):
-        return reconciler.reconcile(self.cursor, 1, list(trips), lambda moments: self.samples)
+        def samples_for(moments):
+            self.asked = moments
+            return self.samples
+
+        return reconciler.reconcile(self.cursor, 1, list(trips), samples_for)
 
     # -- readers ----------------------------------------------
 
@@ -184,6 +197,21 @@ class ReconcileDriveEdgesTest(unittest.TestCase):
         self.assertEqual(
             self.db.execute("SELECT confirmed_start_at, confirmed_end_at FROM xpengmate_drive_repairs").fetchone(),
             (at(17, 11, 58, 30), None),
+        )
+
+    def test_extended_end_takes_only_the_trip_end_and_a_far_off_trip_start_does_not_matter(self):
+        self.extended_end_drive(7, at(6, 12), at(6, 12, 30), at(6, 12, 40), 7000.0, 7030.0)
+
+        self.reconcile(reconciler.Trip(at(6, 11, 50), at(6, 12, 41), 6990.0, 7030.2))
+
+        self.assertEqual(self.window(7), (at(6, 12), at(6, 12, 41)))
+        self.assertEqual(
+            [row[:3] for row in self.positions(7)],
+            [(at(6, 12), 50, 7000.0), (at(6, 12, 30), 50, 7028.0), (at(6, 12, 41), None, 7030.0)],
+        )
+        self.assertEqual(
+            self.db.execute("SELECT confirmed_start_at, confirmed_end_at FROM xpengmate_drive_repairs").fetchone(),
+            (None, at(6, 12, 41)),
         )
 
     def test_live_position_after_the_trip_end_widens_the_end(self):
@@ -314,6 +342,63 @@ class ReconcileDriveEdgesTest(unittest.TestCase):
         self.assert_only_the_inserted_drive_changed(
             report, 2, (at(17, 12), at(17, 12, 40)), "new times overlap another drive or a charge"
         )
+
+    def test_a_clash_on_one_edge_keeps_both_edges_of_the_drive(self):
+        self.drive(3, at(6, 8), at(6, 9, 55), 4000.0, 4020.0)
+        self.inserted(1, at(6, 10), at(6, 10, 30), 5000.0, 5004.0)
+
+        report = self.reconcile(reconciler.Trip(at(6, 9, 50), at(6, 10, 20), 5000.2, 5003.9))
+
+        self.assertEqual(self.window(1), (at(6, 10), at(6, 10, 30)))
+        self.assertEqual(
+            self.db.execute("SELECT confirmed_start_at, confirmed_end_at FROM xpengmate_drive_repairs").fetchone(),
+            (None, None),
+        )
+        self.assertEqual(report["changed"], [])
+
+    def test_dropping_a_clashing_drive_restores_its_window_and_drops_the_drive_that_clashes_with_it(self):
+        self.drive(3, at(6, 8), at(6, 9, 55), 4000.0, 4020.0)
+        self.inserted(1, at(6, 10), at(6, 10, 30), 5000.0, 5004.0)
+        self.extended_start(2, at(6, 10, 35), at(6, 10, 40), at(6, 11), 6000.0, 6030.0)
+
+        report = self.reconcile(
+            reconciler.Trip(at(6, 9, 50), at(6, 10, 20), 5000.2, 5003.9),
+            reconciler.Trip(at(6, 10, 25), at(6, 11), 6000.1, 6030.0),
+        )
+
+        self.assertEqual(self.window(1), (at(6, 10), at(6, 10, 30)))
+        self.assertEqual(self.window(2), (at(6, 10, 35), at(6, 11)))
+        self.assertEqual([s["drive_id"] for s in report["skipped"]], [1, 2])
+        self.assertEqual(report["changed"], [])
+
+    def test_new_times_are_asked_from_the_export_not_the_old_ones(self):
+        self.inserted(1, at(5, 9, 12, 30), at(5, 9, 17, 30), 5000.0, 5004.0)
+
+        self.reconcile(reconciler.Trip(at(5, 9, 10), at(5, 9, 15), 5000.2, 5003.9))
+
+        self.assertEqual(self.asked, [at(5, 9, 10), at(5, 9, 15)])
+
+    def test_no_export_sample_at_the_new_moment_keeps_the_battery_odometer_and_range(self):
+        self.inserted(1, at(5, 9, 12, 30), at(5, 9, 17, 30), 5000.0, 5004.0)
+
+        self.reconcile(reconciler.Trip(at(5, 9, 10), at(5, 9, 15), 5000.2, 5003.9))
+
+        self.assertEqual(
+            self.db.execute(
+                "SELECT date, odometer, battery_level, usable_battery_level, rated_battery_range_km,"
+                " ideal_battery_range_km FROM positions ORDER BY date"
+            ).fetchall(),
+            [(at(5, 9, 10), 5000.0, 60, 60, 300.0, 300.0), (at(5, 9, 15), 5004.0, 60, 60, 300.0, 300.0)],
+        )
+        self.assertEqual(
+            self.db.execute(
+                "SELECT start_rated_range_km, start_ideal_range_km FROM drives WHERE id = 1"
+            ).fetchone(),
+            (300.0, 300.0),
+        )
+
+    def test_every_repair_kind_has_its_sides(self):
+        self.assertEqual(set(reconciler._SIDES), set(repairer.GAP_KINDS))
 
     def test_one_trip_claimed_by_two_drives_moves_neither(self):
         self.inserted(1, at(5, 9, 12, 30), at(5, 9, 17, 30), 5000.0, 5004.0)

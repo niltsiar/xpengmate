@@ -137,6 +137,7 @@ class ImportExportsTest(unittest.TestCase):
         self.events = []
         self.report = {"changed": [], "skipped": [], "positions_moved": 0, "positions_linked": 0}
         self.inserts = mock.Mock()
+        self.import_drives = mock.Mock()
         self.enrich = mock.Mock(return_value=0)
         self.energy = mock.Mock(return_value=set())
 
@@ -151,13 +152,16 @@ class ImportExportsTest(unittest.TestCase):
             return self.report
 
         def parse_files(paths):
-            return MergedExport(files=[ExportData(path=path, samples=1) for path in paths])
+            return MergedExport(
+                files=[ExportData(path=path, samples=1) for path in paths],
+                drives=[self.drive_of(path) for path in paths],
+            )
 
         for patch in (
             mock.patch.object(export_import, "Store", make_store),
             mock.patch.object(export_import.Importer, "prepare", lambda importer: None),
             mock.patch.object(export_import.Importer, "existing_windows", lambda importer, *args: []),
-            mock.patch.object(export_import.Importer, "import_drives", self.inserts),
+            mock.patch.object(export_import.Importer, "import_drives", self.import_drives),
             mock.patch.object(export_import.Importer, "import_charges", self.inserts),
             mock.patch.object(export_import.Importer, "import_states", self.inserts),
             mock.patch.object(export_import.Importer, "import_tyres", self.inserts),
@@ -168,6 +172,10 @@ class ImportExportsTest(unittest.TestCase):
         ):
             patch.start()
             self.addCleanup(patch.stop)
+
+    def drive_of(self, path):
+        hour = 9 if path.endswith("a.zip") else 10
+        return Drive(epoch(hour), epoch(hour, 10), 4.0, 5000.0, 5004.0)
 
     def recorded(self):
         return [row[0] for row in self.db.execute("SELECT filename FROM xpengmate_export_imports ORDER BY filename")]
@@ -190,6 +198,27 @@ class ImportExportsTest(unittest.TestCase):
         self.assertEqual(summary["enrich_failed"], ["b.zip"])
         self.assertEqual(self.recorded(), ["a.zip"])
         self.assertIn("rollback", self.events)
+
+    def test_a_dry_run_rolls_the_reconcile_back_and_imports_and_records_nothing(self):
+        summary = self.run_import(dry_run=True)
+
+        self.assertEqual(self.events, ["reconcile", "rollback"])
+        self.assertTrue(summary["dry_run"])
+        self.assertEqual(self.recorded(), [])
+        self.enrich.assert_not_called()
+        self.import_drives.assert_not_called()
+
+    def test_a_zip_imported_before_is_enriched_again_and_its_drives_are_not_inserted_again(self):
+        self.db.execute(
+            "INSERT INTO xpengmate_export_imports (filename, sha256) VALUES (?, ?)",
+            ("a.zip", export_import.file_sha256(self.paths[0])),
+        )
+
+        summary = self.run_import()
+
+        self.assertEqual([call.args[1] for call in self.enrich.call_args_list], self.paths)
+        self.assertEqual(self.import_drives.call_args.args[0], [self.drive_of(self.paths[1])])
+        self.assertEqual((summary["duplicates"], summary["files_imported"]), (1, 1))
 
     def test_a_drive_two_zips_both_cover_counts_once_in_the_summary(self):
         self.energy.side_effect = [{1, 2}, {2, 3}]
