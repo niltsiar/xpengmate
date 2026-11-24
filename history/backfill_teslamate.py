@@ -91,7 +91,11 @@ def charge_cost(
     billing_type: str | None, cost_per_unit: Any, session_fee: Any,
     energy_used: Any, energy_added: Any, duration_min: Any,
 ) -> Decimal | None:
-    """The cost TeslaMate's ``calculate_charge_costs`` writes, rounded like its 2-decimal column."""
+    """The cost TeslaMate's live ``put_cost`` writes, rounded like its 2-decimal column.
+
+    None when the geofence has no price, or when the charge lacks what its billing type
+    multiplies: both energies for per_kwh, the duration for per_minute.
+    """
     if cost_per_unit is None and session_fee is None:
         return None
     if billing_type == "per_kwh":
@@ -100,8 +104,10 @@ def charge_cost(
         quantity = duration_min
     else:
         return None
+    if quantity is None:
+        return None
     cost = Decimal(str(session_fee or 0))
-    if cost_per_unit is not None and quantity is not None:
+    if cost_per_unit is not None:
         cost += Decimal(str(cost_per_unit)) * Decimal(str(quantity))
     return cost.quantize(Decimal("0.01"), ROUND_HALF_UP)
 

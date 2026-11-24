@@ -75,10 +75,11 @@ class BoundaryGeofenceTest(unittest.TestCase):
             "INSERT INTO positions (latitude, longitude) VALUES (?, ?)", point
         ).lastrowid
 
-    def charge(self, charge_id, point, end=END, geofence=None, cost=None, minutes=90):
+    def charge(self, charge_id, point, end=END, geofence=None, cost=None, minutes=90,
+               energy=(12.5, 11.0)):
         self.db.execute(
-            "INSERT INTO charging_processes VALUES (?, 1, ?, ?, ?, ?, ?, 12.5, 11.0, ?)",
-            (charge_id, START, end, self.position(point), geofence, cost, minutes),
+            "INSERT INTO charging_processes VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (charge_id, START, end, self.position(point), geofence, cost, *energy, minutes),
         )
 
     def charge_row(self, *columns):
@@ -167,6 +168,18 @@ class BoundaryGeofenceTest(unittest.TestCase):
         self.charge(1, NEAR, minutes=90)
         self.fill()
         self.assertEqual(self.charge_row("cost"), (5.5,))
+
+    def test_per_kwh_charge_without_any_energy_keeps_a_null_cost(self):
+        self.geofence(1, CENTER, 60, unit=0.10, fee=0.50)
+        self.charge(1, NEAR, energy=(None, None))
+        self.fill()
+        self.assertEqual(self.charge_row("geofence_id", "cost"), (1, None))
+
+    def test_per_minute_charge_without_a_duration_keeps_a_null_cost(self):
+        self.geofence(1, CENTER, 60, billing="per_minute", unit=0.05, fee=1.00)
+        self.charge(1, NEAR, minutes=None)
+        self.fill()
+        self.assertEqual(self.charge_row("geofence_id", "cost"), (1, None))
 
     def test_geofence_without_prices_leaves_the_cost_null(self):
         self.geofence(1, CENTER, 60, unit=None, fee=None)

@@ -1,6 +1,8 @@
+import contextlib
 import sqlite3
 import unittest
 from datetime import datetime, timedelta
+from unittest import mock
 
 import repair_drive_gaps as repairer
 
@@ -86,11 +88,33 @@ EVENING_RANGES = [
 EVENING_BATTERIES = [(at(10, 17), "60")]
 
 
+class _SavepointConnection:
+    """``transaction()`` of a psycopg connection already in a transaction: a savepoint."""
+
+    def __init__(self, db):
+        self._db = db
+
+    @contextlib.contextmanager
+    def transaction(self):
+        self._db.execute("SAVEPOINT nested")
+        try:
+            yield
+        except BaseException:
+            self._db.execute("ROLLBACK TO nested")
+            self._db.execute("RELEASE nested")
+            raise
+        self._db.execute("RELEASE nested")
+
+
 class _PsycopgStyleCursor:
     """Lets the psycopg-style %s queries run on SQLite."""
 
     def __init__(self, cursor):
         self._cursor = cursor
+
+    @property
+    def connection(self):
+        return _SavepointConnection(self._cursor.connection)
 
     @property
     def rowcount(self):
@@ -239,6 +263,26 @@ class RepairDriveGapsTest(unittest.TestCase):
             [self.row("drives", drive_id)["start_geofence_id"] for drive_id in (2, 3)], [1, None]
         )
 
+    def test_a_fill_error_rolls_back_only_the_fill_and_keeps_the_repairs(self):
+        for drive in EVENING_DRIVES:
+            self.drive(*drive)
+
+        def failing_fill(cursor, car_id):
+            cursor.execute("UPDATE drives SET end_geofence_id = 99")
+            raise RuntimeError("fill broke")
+
+        with mock.patch.object(repairer, "fill_geofences_and_costs", failing_fill), \
+                self.assertLogs(repairer._LOGGER, "WARNING") as logs:
+            repairs = self.repair(EVENINGS, EVENING_LOCATIONS)
+        self.assertIn("fill broke", logs.output[0])
+        self.assertEqual([r["kind"] for r in repairs], ["extended_start", "extended_start"])
+        self.assertEqual(self.row("drives", 2)["start_km"], 10421.0)
+        self.assertEqual(self.counts()[2], 2)
+        self.assertEqual(
+            self.db.execute("SELECT count(*) FROM drives WHERE end_geofence_id IS NOT NULL").fetchone(),
+            (0,),
+        )
+
     def test_extended_start_takes_range_and_battery_in_effect_at_the_new_start(self):
         for drive in EVENING_DRIVES:
             self.drive(*drive)
@@ -291,6 +335,21 @@ class RepairDriveGapsTest(unittest.TestCase):
         self.drive(5, at(11, 18, 30), None, 10520.0, None)
         self.assertEqual(self.repair(TRIP, TRIP_LOCATIONS), [])
         self.assertEqual(len(self.drives()), 2)
+
+    def test_orphan_closed_next_to_a_live_drive_gets_its_geofences(self):
+        self.db.execute(
+            "INSERT INTO geofences (id, latitude, longitude, radius) VALUES (1, 12.0, 34.0, 50)"
+        )
+        self.drive(5, at(9, 8), None, None, None)
+        for moment, km in ((at(9, 8, 2), 10400.0), (at(9, 8, 20), 10410.5)):
+            self.position(5, moment, km)
+        self.drive(6, at(9, 10), at(9, 10, 30), 10410.5, 10420.0)
+        self.drive(7, at(11, 18, 30), None, 10520.0, None)
+        repairs = self.repair([])
+        self.assertEqual([r["kind"] for r in repairs], ["closed_orphan"])
+        drive = self.row("drives", 5)
+        self.assertEqual((drive["start_geofence_id"], drive["end_geofence_id"]), (1, 1))
+        self.assertIsNone(self.row("drives", 7)["end_date"])
 
     def test_orphan_with_a_later_drive_is_closed_from_its_positions(self):
         self.drive(5, at(9, 8), None, None, None)

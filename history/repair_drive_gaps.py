@@ -15,9 +15,10 @@ every few minutes, until the export import confirms them in the repair row
 (``confirmed_start_at``, ``confirmed_end_at``). A moved drive end and each new
 position take the range and battery level in effect at their date from the
 optional HA sensors, else NULL; the old value of a moved end describes another
-moment. A moved edge loses its address until the next backfill, and gets the geofence
-of its new position in the same transaction. Each repair is a row in
-``xpengmate_drive_repairs``, so a rerun finds nothing new.
+moment. A moved edge loses its address until the next backfill. After a repair, the
+transaction also fills every closed drive edge and charge of the car that has no geofence,
+and each fenced charge without a cost, in a savepoint: a failed fill rolls back only
+itself. Each repair is a row in ``xpengmate_drive_repairs``, so a rerun finds nothing new.
 
 Open drives with a later drive or charging process are closed first, from their
 positions, like the app's ``close_drive``. A car with a live drive is skipped.
@@ -443,6 +444,15 @@ def _repair_gap(
             "estimated": True, **repair}
 
 
+def _fill_geofences_and_costs(cursor: Any, car_id: int) -> None:
+    """Run the fill in a savepoint, so an error rolls back only the fill."""
+    try:
+        with cursor.connection.transaction():
+            fill_geofences_and_costs(cursor, car_id)
+    except Exception as error:
+        _LOGGER.warning("geofence and cost fill for car %s failed, repairs kept: %s", car_id, error)
+
+
 def repair_gaps(
     cursor: Any, car_id: int, fetch_odometer: OdometerFetcher,
     fetch_location: LocationFetcher, now: datetime,
@@ -458,7 +468,7 @@ def repair_gaps(
               (car_id,)) is not None:
         _LOGGER.info("drive gap repair skipped car %s: a drive is in progress", car_id)
         if repairs:
-            fill_geofences_and_costs(cursor, car_id)
+            _fill_geofences_and_costs(cursor, car_id)
         return repairs
     watermark = _first(
         cursor,
@@ -532,7 +542,7 @@ def repair_gaps(
         car_id, len(episodes), covered_km, repaired_km,
     )
     if repairs:
-        fill_geofences_and_costs(cursor, car_id)
+        _fill_geofences_and_costs(cursor, car_id)
     return repairs
 
 
