@@ -27,11 +27,13 @@ import csv
 import heapq
 import io
 import logging
+import math
 import zipfile
+from array import array
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 _LOGGER = logging.getLogger("xpengmate.export_parser")
 
@@ -167,26 +169,58 @@ def _members(archive: zipfile.ZipFile, suffix: str) -> list[str]:
     return sorted(names, key=part)
 
 
+def in_timer_order(rows: Iterable[tuple[int, dict]], keys: list[str]) -> Iterator[tuple[int, dict]]:
+    """The numeric ``keys`` of ``rows``, in timer order.
+
+    A dataset can hold one day's block out of place (seen in ``driving_operation_di``),
+    and a join on ``timer`` needs every input sorted. All rows are read before the
+    first one is yielded; the values wait in compact arrays, 8 bytes per value.
+    """
+    timers = array("q")
+    columns = [array("d") for _key in keys]
+    in_order = True
+    for timer, values in rows:
+        if timers and timer < timers[-1]:
+            in_order = False
+        timers.append(timer)
+        for column, key in zip(columns, keys):
+            value = values[key]
+            column.append(math.nan if value is None else value)
+    indexes = range(len(timers)) if in_order else sorted(range(len(timers)), key=timers.__getitem__)
+    for index in indexes:
+        yield timers[index], {
+            key: None if math.isnan(column[index]) else column[index] for column, key in zip(columns, keys)
+        }
+
+
 def _stream(archive: zipfile.ZipFile, suffix: str, fields: dict[str, Any]) -> Iterator[tuple[int, dict]]:
-    for name in _members(archive, suffix):
-        with archive.open(name) as raw:
-            reader = csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8-sig", newline=""))
-            for row in reader:
-                try:
-                    timer = int(float(row.get("timer") or 0))
-                except (TypeError, ValueError):
-                    continue
-                values: dict[str, Any] = {"vin": row.get("vin") or ""}
-                for key, column in fields.items():
-                    aliases = ENERGY_ALIASES.get(key) if isinstance(fields, dict) else None
-                    candidates = aliases or (column,)
-                    for candidate in candidates:
-                        if candidate in row:
-                            values[key] = _num(row.get(candidate))
-                            break
-                    else:
-                        values[key] = None
-                yield timer, values
+    """The dataset's rows in timer order, each with the dataset's first VIN."""
+    vin = ""
+
+    def rows() -> Iterator[tuple[int, dict]]:
+        nonlocal vin
+        for name in _members(archive, suffix):
+            with archive.open(name) as raw:
+                reader = csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8-sig", newline=""))
+                for row in reader:
+                    try:
+                        timer = int(float(row.get("timer") or 0))
+                    except (TypeError, ValueError):
+                        continue
+                    vin = vin or row.get("vin") or ""
+                    values: dict[str, Any] = {}
+                    for key, column in fields.items():
+                        for candidate in ENERGY_ALIASES.get(key) or (column,):
+                            if candidate in row:
+                                values[key] = _num(row.get(candidate))
+                                break
+                        else:
+                            values[key] = None
+                    yield timer, values
+
+    for timer, values in in_timer_order(rows(), list(fields)):
+        values["vin"] = vin
+        yield timer, values
 
 
 def _merged_samples(zip_path: str) -> Iterator[tuple[int, dict]]:
