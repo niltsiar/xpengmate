@@ -135,6 +135,7 @@ class ImportExportsTest(unittest.TestCase):
             """
         )
         self.events = []
+        self.report = {"changed": [], "skipped": [], "positions_moved": 0, "positions_linked": 0}
         self.inserts = mock.Mock()
         self.enrich = mock.Mock(return_value=0)
         self.energy = mock.Mock(return_value=set())
@@ -147,7 +148,7 @@ class ImportExportsTest(unittest.TestCase):
 
         def reconcile(cursor, car_id, trips, samples_for):
             self.events.append("reconcile")
-            return {"changed": [], "skipped": [], "positions_moved": 0}
+            return self.report
 
         def parse_files(paths):
             return MergedExport(files=[ExportData(path=path, samples=1) for path in paths])
@@ -196,6 +197,22 @@ class ImportExportsTest(unittest.TestCase):
         summary = self.run_import()
 
         self.assertEqual(summary["drive_energies"], 3)
+
+    def test_the_log_gives_the_reconcile_as_counts_and_the_summary_keeps_the_report(self):
+        self.report = {
+            "changed": [{"drive_id": n} for n in range(30)],
+            "skipped": [{"drive_id": 40}],
+            "positions_moved": 25,
+            "positions_linked": 7,
+        }
+
+        with self.assertLogs("xpengmate.export_import", "INFO") as logs:
+            summary = self.run_import()
+
+        self.assertIn(
+            "30 edges changed, 1 guesses skipped, 25 positions moved, 7 positions linked", logs.output[0]
+        )
+        self.assertEqual(summary["reconciled"], self.report)
 
     def test_the_command_exits_1_when_the_import_is_not_ok(self):
         for ok, code in ((True, 0), (False, 1)):

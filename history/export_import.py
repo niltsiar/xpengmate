@@ -555,7 +555,13 @@ def import_exports(
         importer.prepare()
         every: MergedExport = parse_files(paths)
         reconciled = importer.reconcile(every.drives, paths)
-        _LOGGER.info("drive edges reconciled: %s", json.dumps(reconciled, default=str)[:800])
+        _LOGGER.info(
+            "drive edges reconciled: %d edges changed, %d guesses skipped, %d positions moved, %d positions linked",
+            len(reconciled["changed"]),
+            len(reconciled["skipped"]),
+            reconciled["positions_moved"],
+            reconciled["positions_linked"],
+        )
         if dry_run:
             importer.conn.rollback()
             return {"ok": True, "dry_run": True, "reconciled": reconciled}
@@ -593,7 +599,8 @@ def import_exports(
                 "vin": every.vin or vin,
             }
         )
-        _LOGGER.info("export import complete: %s", json.dumps(summary, default=str)[:800])
+        logged = {key: value for key, value in summary.items() if key != "reconciled"}
+        _LOGGER.info("export import complete: %s", json.dumps(logged, default=str)[:800])
         return summary
     finally:
         importer.store.close()
