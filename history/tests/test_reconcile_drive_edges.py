@@ -83,6 +83,15 @@ class ReconcileDriveEdgesTest(unittest.TestCase):
         self.position(drive_id, end, end_km, speed=0)
         self.repair(drive_id, "extended_start", guess, live_start)
 
+    def extended_end(self, drive_id, new_end, end_km):
+        """The repair job moved the end of an existing drive on to ``new_end``."""
+        old_end = self.window(drive_id)[1]
+        self.db.execute(
+            "UPDATE drives SET end_date = ?, end_km = ? WHERE id = ?", (new_end, end_km, drive_id)
+        )
+        self.position(drive_id, new_end, end_km)
+        self.repair(drive_id, "extended_end", old_end, new_end)
+
     def sample(self, moment, soc, odometer, range_km):
         self.samples[moment] = (soc, odometer, range_km)
 
@@ -182,6 +191,37 @@ class ReconcileDriveEdgesTest(unittest.TestCase):
         self.assertEqual(self.window(2)[0], at(17, 11, 58, 30))
         self.assertEqual(self.positions(2), before)
         self.assertEqual(report["positions_moved"], 0)
+
+    def test_start_edge_still_reconciles_after_a_later_repair_moved_the_end_again(self):
+        self.inserted(1, at(5, 9, 12, 30), at(5, 9, 17, 30), 5000.0, 5004.0)
+        self.extended_end(1, at(5, 9, 30), 5010.0)
+
+        report = self.reconcile(reconciler.Trip(at(5, 9, 10), at(5, 9, 15), 5000.2, 5003.9))
+
+        self.assertEqual(self.window(1), (at(5, 9, 10), at(5, 9, 30)))
+        self.assertEqual(
+            [row[:3] for row in self.positions(1)],
+            [(at(5, 9, 10), None, 5000.0), (at(5, 9, 17, 30), None, 5004.0), (at(5, 9, 30), None, 5010.0)],
+        )
+        self.assertEqual(
+            self.db.execute(
+                "SELECT kind, confirmed_start_at, confirmed_end_at FROM xpengmate_drive_repairs ORDER BY id"
+            ).fetchall(),
+            [("inserted", at(5, 9, 10), None), ("extended_end", None, None)],
+        )
+        self.assertEqual([(c["side"]) for c in report["changed"]], ["start"])
+
+    def test_guess_whose_every_edge_moved_again_is_skipped(self):
+        self.extended_start(2, at(17, 12), at(17, 12, 10), at(17, 12, 40), 2000.0, 2030.0)
+        self.db.execute("UPDATE drives SET start_date = ? WHERE id = 2", (at(17, 11, 50),))
+
+        report = self.reconcile(reconciler.Trip(at(17, 11, 58, 30), at(17, 12, 40, 30), 2000.1, 2030.0))
+
+        self.assertEqual(self.window(2), (at(17, 11, 50), at(17, 12, 40)))
+        self.assertEqual(
+            [(s["drive_id"], s["reason"]) for s in report["skipped"]],
+            [(2, "drive edge changed after the repair")],
+        )
 
     # -- rejected matches, each next to a drive that changes ---
 

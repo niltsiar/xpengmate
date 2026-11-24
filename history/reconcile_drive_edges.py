@@ -62,24 +62,23 @@ class Guess:
     live: tuple[datetime, datetime] | None = None
 
     def edges(self) -> dict[str, datetime]:
-        """The guessed time of each edge this repair moved."""
+        """The guessed time of each edge this repair moved that the drive still has."""
         guessed = {"start": self.guessed_start, "end": self.guessed_end}
-        return {side: guessed[side] for side in _SIDES[self.kind]}
-
-    def is_current(self) -> bool:
-        """False when something moved the edge after the repair."""
         current = {"start": self.start, "end": self.end}
-        return all(current[side] == moment for side, moment in self.edges().items())
+        return {side: guessed[side] for side in _SIDES[self.kind] if current[side] == guessed[side]}
 
     def fits(self, trip: Trip) -> bool:
-        near_start = abs(trip.km_from - self.start_km) <= PRECISE_LOWER_KM
-        near_end = abs(trip.km_to - self.end_km) <= PRECISE_LOWER_KM
-        if self.kind == "inserted":
+        sides = self.edges()
+        near = {
+            "start": abs(trip.km_from - self.start_km) <= PRECISE_LOWER_KM,
+            "end": abs(trip.km_to - self.end_km) <= PRECISE_LOWER_KM,
+        }
+        if len(sides) == 2:
             overlap = min(trip.km_to, self.end_km) - max(trip.km_from, self.start_km)
             longest = max(trip.km_to - trip.km_from, self.end_km - self.start_km)
-            return near_start and near_end and overlap >= MIN_KM_OVERLAP * longest
+            return near["start"] and near["end"] and overlap >= MIN_KM_OVERLAP * longest
         in_time = trip.start <= self.end and trip.end >= self.start
-        return in_time and (near_start if self.kind == "extended_start" else near_end)
+        return in_time and all(near[side] for side in sides)
 
 
 @dataclass
@@ -109,7 +108,7 @@ def match_guessed_edges(
 
     matched: list[tuple[Guess, Trip]] = []
     for guess in guesses:
-        if not guess.is_current():
+        if not guess.edges():
             skip(guess, "drive edge changed after the repair")
             continue
         candidates = [trip for trip in trips if guess.fits(trip)]
