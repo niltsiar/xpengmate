@@ -190,9 +190,12 @@ def _windows(cursor: Any, table: str, car_id: int) -> list[tuple[int, datetime, 
     return [(row_id, start, end or datetime.max) for row_id, start, end in cursor.fetchall()]
 
 
-def apply_changes(cursor: Any, changes: list[EdgeChange], samples: dict[datetime, Sample]) -> int:
-    """Write the changes; returns how many estimated positions moved."""
+def apply_changes(
+    cursor: Any, car_id: int, changes: list[EdgeChange], samples: dict[datetime, Sample]
+) -> tuple[int, int]:
+    """Write the changes; returns how many estimated positions moved and how many were linked."""
     moved = 0
+    linked = 0
     for change in changes:
         side = change.side
         soc, odometer, range_km = samples.get(change.new, (None, None, None))
@@ -221,7 +224,13 @@ def apply_changes(cursor: Any, changes: list[EdgeChange], samples: dict[datetime
         cursor.execute("SELECT start_date, end_date FROM drives WHERE id = %s", (drive_id,))
         start, end = cursor.fetchone()
         cursor.execute("UPDATE drives SET duration_min = %s WHERE id = %s", (duration_min(start, end), drive_id))
-    return moved
+        cursor.execute(
+            "UPDATE positions SET drive_id = %s"
+            " WHERE car_id = %s AND drive_id IS NULL AND date >= %s AND date <= %s",
+            (drive_id, car_id, start, end),
+        )
+        linked += cursor.rowcount
+    return moved, linked
 
 
 def reconcile(cursor: Any, car_id: int, trips: list[Trip], samples_for: SamplesFor) -> dict[str, Any]:
@@ -230,7 +239,9 @@ def reconcile(cursor: Any, car_id: int, trips: list[Trip], samples_for: SamplesF
     drives = {row_id: (start, end) for row_id, start, end in _windows(cursor, "drives", car_id)}
     charges = [(start, end) for _id, start, end in _windows(cursor, "charging_processes", car_id)]
     changes, skipped = match_guessed_edges(guesses, trips, drives, charges)
-    moved = apply_changes(cursor, changes, samples_for([change.new for change in changes]) if changes else {})
+    moved, linked = apply_changes(
+        cursor, car_id, changes, samples_for([change.new for change in changes]) if changes else {}
+    )
     return {
         "changed": [
             {"drive_id": c.drive_id, "side": c.side, "from": c.old.isoformat(), "to": c.new.isoformat()}
@@ -238,4 +249,5 @@ def reconcile(cursor: Any, car_id: int, trips: list[Trip], samples_for: SamplesF
         ],
         "skipped": skipped,
         "positions_moved": moved,
+        "positions_linked": linked,
     }

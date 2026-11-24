@@ -153,6 +153,24 @@ class ReconcileDriveEdgesTest(unittest.TestCase):
         )
         self.assertEqual(report["positions_moved"], 2)
 
+    def test_idle_positions_inside_the_new_window_are_linked_to_the_drive(self):
+        self.inserted(1, at(5, 9, 12, 30), at(5, 9, 17, 30), 5000.0, 5004.0)
+        inside_widened_start = self.position(None, at(5, 9, 11), 5000.1)
+        inside_both = self.position(None, at(5, 9, 13), 5002.0)
+        after_new_end = self.position(None, at(5, 9, 16), 5004.0)
+        other_car = self.db.execute(
+            "INSERT INTO positions (car_id, date) VALUES (2, ?)", (at(5, 9, 12),)
+        ).lastrowid
+
+        report = self.reconcile(reconciler.Trip(at(5, 9, 10), at(5, 9, 15), 5000.2, 5003.9))
+
+        linked = dict(self.db.execute("SELECT id, drive_id FROM positions").fetchall())
+        self.assertEqual(
+            (linked[inside_widened_start], linked[inside_both], linked[after_new_end], linked[other_car]),
+            (1, 1, None, None),
+        )
+        self.assertEqual(report["positions_linked"], 2)
+
     def test_extended_start_takes_only_the_trip_start(self):
         self.extended_start(2, at(17, 12), at(17, 12, 10), at(17, 12, 40), 2000.0, 2030.0)
 
