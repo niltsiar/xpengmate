@@ -46,7 +46,8 @@ from import_history import Store, naive_utc
 
 _LOGGER = logging.getLogger("xpengmate.export_import")
 
-KM_COVER_RATIO = 0.3
+#: Share of a trip's km an existing drive must hold for the trip to count as logged.
+KM_COVER_RATIO = 0.5
 CHARGE_OVERLAP_RATIO = 0.3
 POSITION_LINK_TOLERANCE_HOURS = 6
 MIN_STATE_SECONDS = 60

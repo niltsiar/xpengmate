@@ -107,9 +107,9 @@ class ImportDrivesTest(unittest.TestCase):
 class KmCoveredTest(unittest.TestCase):
     TRIP = Drive(epoch(9), epoch(9, 10), 10.0, 5000.0, 5010.0)
 
-    def test_existing_km_cover_a_trip_only_above_30_percent_of_its_km(self):
-        self.assertTrue(export_import._km_covered(self.TRIP, [(5000.0, 5003.1)]))
-        self.assertFalse(export_import._km_covered(self.TRIP, [(5000.0, 5002.9)]))
+    def test_existing_km_cover_a_trip_only_above_half_of_its_km(self):
+        self.assertTrue(export_import._km_covered(self.TRIP, [(5000.0, 5005.1)]))
+        self.assertFalse(export_import._km_covered(self.TRIP, [(5000.0, 5004.9)]))
 
 
 class ImportExportsTest(unittest.TestCase):
