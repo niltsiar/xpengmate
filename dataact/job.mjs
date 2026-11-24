@@ -59,7 +59,7 @@ function makeScrubber(secrets) {
   };
 }
 
-const errorClass = e => (e && typeof e === 'object' && e.constructor?.name) || typeof e;
+export const errorClass = e => (e && typeof e === 'object' && e.constructor?.name) || typeof e;
 
 function failureMessage(step, err) {
   let text = `${STEP_TEXT[step] ?? 'job'} failed`;

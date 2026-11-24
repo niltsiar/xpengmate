@@ -1,17 +1,15 @@
-// The XPENG Data Act portal driven through Playwright. The login steps and selectors are the ones that worked
-// against the live portal; the nextApi calls reuse the headers the page itself sends.
+// The XPENG Data Act portal driven through Playwright. The nextApi calls reuse the headers the page itself sends.
 import { createWriteStream } from 'node:fs';
 import { rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { chromium } from 'playwright-core';
-import { JobError } from './job.mjs';
+import { JobError, errorClass } from './job.mjs';
 
 const PORTAL = 'https://www.xpeng.com/data-act/my-data';
 const API = '/nextApi/dataAct/myData/';
 // Requests to any other host are aborted. A blocked host is logged once by name.
-// The captcha vendor hosts stay open as in the login run that worked; the initNECaptcha stub still answers the captcha.
 const ALLOWED_HOSTS = [
   'www.xpeng.com', 'login.xpeng.com',
   'a-cdn.xpeng.com', 's-cdn.xpeng.com', 'static.xpeng.com', 'f.xiaopeng.com',
@@ -161,8 +159,8 @@ export function createPortal({ log, solverUrl, solverToken }) {
         await page.waitForURL(/www\.xpeng\.com\/data-act\/my-data/);
       } catch {
         if (!loginAnswer) throw new JobError({ detail: 'the login page did not finish' });
-        const code = Number.isInteger(loginAnswer.code) ? loginAnswer.code : undefined;
-        throw new JobError({ detail: LOGIN_CODES.get(code) ?? 'login refused', status: loginAnswer.status, code });
+        const { code, status } = loginAnswer;
+        throw new JobError({ detail: LOGIN_CODES.get(code) ?? 'login refused', status, code });
       }
       await page.waitForLoadState('networkidle').catch(() => {});
     },
@@ -194,7 +192,7 @@ export function createPortal({ log, solverUrl, solverToken }) {
         if (!r.ok || !r.body) throw new JobError({ detail: 'the download was refused', status: r.status });
         return await saveZip(Readable.fromWeb(r.body), dir, record.recordNo);
       } catch (e) {
-        log(`direct download failed (${e?.constructor?.name}); trying the download button`);
+        log(`direct download failed (${errorClass(e)}); trying the download button`);
         return clickDownload(record, dir);
       }
     },

@@ -5,7 +5,7 @@ import { CLUSTERS, LIMITS, createRunner } from '../job.mjs';
 
 export const EMAIL = 'owner@example.test';
 export const PASSWORD = 'pa"ss\\w/rd&1';
-export const T0 = Date.parse('2099-01-01T00:00:00Z');
+const T0 = Date.parse('2099-01-01T00:00:00Z');
 export const ZIP_BYTES = Buffer.from('PK\x03\x04fake export');
 
 export const record = (recordNo, status, extra = {}) => ({
@@ -13,7 +13,7 @@ export const record = (recordNo, status, extra = {}) => ({
   createTime: '2098-12-31 23:00:00', expireTime: '2099-01-07 23:00:00', ...extra,
 });
 
-export function fakeClock() {
+function fakeClock() {
   const clock = { t: T0, now: () => clock.t, sleep: ms => { clock.t += ms; return new Promise(r => setImmediate(r)); } };
   return clock;
 }

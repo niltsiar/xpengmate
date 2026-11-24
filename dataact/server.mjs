@@ -4,7 +4,7 @@ import { openAsBlob } from 'node:fs';
 import http from 'node:http';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { JobError, createRunner } from './job.mjs';
+import { JobError, createRunner, errorClass } from './job.mjs';
 import { createPortal } from './portal.mjs';
 
 const BODY_LIMIT = 4096;
@@ -35,7 +35,7 @@ export function createServer({ token, runner, log }) {
     if (route === 'GET /healthz') return send(200, { ok: true });
 
     const [scheme, presented = ''] = (req.headers.authorization ?? '').split(' ');
-    if (scheme?.toLowerCase() !== 'bearer' || !timingSafeEqual(digest(presented), expected)) {
+    if (scheme.toLowerCase() !== 'bearer' || !timingSafeEqual(digest(presented), expected)) {
       return send(401, { error: 'unauthorized' });
     }
     if (route === 'GET /status') return send(200, runner.status());
@@ -49,7 +49,7 @@ export function createServer({ token, runner, log }) {
         res.setHeader('connection', 'close');
         return send(413, { error: 'body too large' });
       }
-      log(`bad request body (${e?.constructor?.name})`);
+      log(`bad request body (${errorClass(e)})`);
       return send(400, { error: 'bad request' });
     }
     const { email, password } = input ?? {};
