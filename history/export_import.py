@@ -45,7 +45,7 @@ from import_history import Store, naive_utc
 
 _LOGGER = logging.getLogger("xpengmate.export_import")
 
-DRIVE_OVERLAP_RATIO = 0.3
+KM_COVER_RATIO = 0.3
 CHARGE_OVERLAP_RATIO = 0.3
 POSITION_LINK_TOLERANCE_HOURS = 6
 MIN_STATE_SECONDS = 60
@@ -85,7 +85,7 @@ def _km_covered(drive: Drive, kms: list[tuple[float, float]]) -> bool:
         return False
     length = drive.odometer_end - drive.odometer_start
     return any(
-        min(high, drive.odometer_end) - max(low, drive.odometer_start) > DRIVE_OVERLAP_RATIO * length
+        min(high, drive.odometer_end) - max(low, drive.odometer_start) > KM_COVER_RATIO * length
         for low, high in kms
     )
 

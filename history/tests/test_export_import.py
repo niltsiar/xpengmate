@@ -104,6 +104,14 @@ class ImportDrivesTest(unittest.TestCase):
         self.assertEqual((self.importer.added_drives, self.importer.skipped_drives), (1, 1))
 
 
+class KmCoveredTest(unittest.TestCase):
+    TRIP = Drive(epoch(9), epoch(9, 10), 10.0, 5000.0, 5010.0)
+
+    def test_existing_km_cover_a_trip_only_above_30_percent_of_its_km(self):
+        self.assertTrue(export_import._km_covered(self.TRIP, [(5000.0, 5003.1)]))
+        self.assertFalse(export_import._km_covered(self.TRIP, [(5000.0, 5002.9)]))
+
+
 class ImportExportsTest(unittest.TestCase):
     """The import flow with the database and the parsing replaced by small fakes."""
 
