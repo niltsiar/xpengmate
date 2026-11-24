@@ -387,11 +387,12 @@ def enrich(store: Any, zip_path: str) -> int:
                 odometer = COALESCE(%s, odometer),
                 est_battery_range_km = COALESCE(%s, est_battery_range_km),
                 ideal_battery_range_km = COALESCE(%s, ideal_battery_range_km),
+                rated_battery_range_km = COALESCE(%s, rated_battery_range_km),
                 power = COALESCE(%s, power)
             WHERE id = %s
             """,
             [
-                (soc, soc, odometer, range_km, range_km, power, position_id)
+                (soc, soc, odometer, range_km, range_km, range_km, power, position_id)
                 for position_id, soc, odometer, range_km, power in updates
             ],
         )

@@ -505,6 +505,9 @@ class HistoryService:
                         summary = json.loads(line[len("EXPORT_IMPORT_SUMMARY "):])
                     except ValueError:
                         summary = {}
+            if ok:
+                # The imported rows start without TeslaMate's derived columns.
+                await self._run_backfill(environment, log, "export import")
         except Exception as exc:  # noqa: BLE001
             log.write(f"export import failed to start: {exc}\n")
         finally:
@@ -567,6 +570,25 @@ class HistoryService:
                 _LOGGER.warning("temperature backfill failed with %s", code)
         except Exception as exc:  # noqa: BLE001
             log.write(f"temperature backfill failed to start: {exc}\n")
+
+    async def _run_backfill(self, environment: dict[str, str], log: Any, after: str) -> None:
+        log.write(f"=== backfill after {after} ===\n")
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "backfill_teslamate.py",
+                "--no-geocode",
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                env=environment,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+            code = await process.wait()
+            log.write(f"=== backfill finished ({code}) ===\n")
+            if code != 0:
+                _LOGGER.warning("backfill after %s failed with %s", after, code)
+        except Exception as exc:  # noqa: BLE001
+            log.write(f"backfill failed to start: {exc}\n")
 
     async def _run_export_import(
         self, paths: list[str], environment: dict[str, str], log: Any
@@ -646,20 +668,7 @@ class HistoryService:
                 # Re-imported rows start without TeslaMate's derived columns
                 # (charger phases, rated ranges, clamps), so the sync is only
                 # complete once the backfill has run over the fresh data.
-                log.write("=== backfill after sync ===\n")
-                backfill = await asyncio.create_subprocess_exec(
-                    sys.executable,
-                    "backfill_teslamate.py",
-                    "--no-geocode",
-                    cwd=os.path.dirname(os.path.abspath(__file__)),
-                    env=environment,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                )
-                backfill_code = await backfill.wait()
-                log.write(f"=== backfill finished ({backfill_code}) ===\n")
-                if backfill_code != 0:
-                    _LOGGER.warning("backfill after sync failed with %s", backfill_code)
+                await self._run_backfill(environment, log, "sync")
                 await self._run_temperature_backfill(environment, log)
         except Exception as exc:  # noqa: BLE001
             log.write(f"sync failed to start: {exc}\n")

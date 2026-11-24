@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import zipfile
 from datetime import datetime, timezone
+from unittest import mock
 
 import export_enrich
 from test_export_import import _Connection
@@ -200,6 +201,70 @@ class StoreDriveEnergyTest(unittest.TestCase):
             (round(36 * 114 / 3600, 3),),
         )
         self.assertEqual(self.db.execute("SELECT power_max FROM drives WHERE id = 4").fetchone(), (36,))
+
+
+class _EnrichCursor:
+    """SQLite for the position UPDATE; the PostgreSQL-only statements are answered by hand."""
+
+    def __init__(self, db, positions):
+        self.db = db
+        self.positions = positions
+        self.rows = []
+        self.rowcount = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=()):
+        if "extract(epoch" in sql:
+            self.rows = self.positions
+        elif "DISTINCT ON" not in sql:
+            self.db.execute(sql.replace("%s", "?"), params)
+
+    def executemany(self, sql, rows):
+        self.db.executemany(sql.replace("%s", "?"), rows)
+
+    def fetchall(self):
+        return self.rows
+
+
+class EnrichTest(unittest.TestCase):
+    def setUp(self):
+        self.db = sqlite3.connect(":memory:")
+        self.db.executescript(
+            """
+            CREATE TABLE positions (
+                id INTEGER PRIMARY KEY, battery_level INTEGER, usable_battery_level INTEGER,
+                odometer REAL, est_battery_range_km REAL, ideal_battery_range_km REAL,
+                rated_battery_range_km REAL, power INTEGER);
+            INSERT INTO positions VALUES (1, NULL, NULL, NULL, NULL, NULL, 240.0, NULL);
+            INSERT INTO positions VALUES (2, NULL, NULL, NULL, NULL, NULL, 245.0, NULL);
+            """
+        )
+        cursor = _EnrichCursor(self.db, [(1, 1000, True), (2, 2000, True)])
+        connection = type("Connection", (), {"cursor": lambda self: cursor, "commit": lambda self: None})()
+        self.store = type("Store", (), {"conn": connection, "car_id": 1})()
+
+    def test_the_export_range_sets_rated_and_ideal_and_a_sample_without_range_keeps_rated(self):
+        samples = iter(
+            [
+                (1000, {"soc": 80.0, "odometer_km": 100.0, "range_km": 300.0}),
+                (2000, {"soc": 70.0}),
+            ]
+        )
+        with mock.patch.object(export_enrich, "resolve_zip", lambda path: path):
+            with mock.patch.object(export_enrich, "iter_samples", lambda path: samples):
+                export_enrich.enrich(self.store, "export.zip")
+
+        self.assertEqual(
+            self.db.execute(
+                "SELECT id, ideal_battery_range_km, rated_battery_range_km FROM positions ORDER BY id"
+            ).fetchall(),
+            [(1, 300.0, 300.0), (2, None, 245.0)],
+        )
 
 
 class PositionUpdatesTest(unittest.TestCase):
