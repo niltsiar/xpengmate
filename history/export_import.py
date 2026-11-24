@@ -16,8 +16,9 @@ same drives and charges more than once. This command:
 4. attaches the export's SoC/odometer/range to existing GPS positions, the
    pack power to drive positions, the hourly tyre pressures to the nearest
    position, and energy used and recovered to each drive (`export_enrich`);
-5. records each imported file by content hash, so re-uploading the same file is
-   a no-op and the settings page can list what has been imported.
+5. records each imported file by content hash, so re-uploading the same file
+   inserts nothing twice (the zip is parsed, reconciled and enriched again) and
+   the settings page can list what has been imported.
 
 Deliberately absent: positions. The export has no coordinates, and inventing
 them is worse than leaving the maps empty.
@@ -617,7 +618,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="report the drive edges the export would move, roll them back, import nothing",
+        help="report the drive edges the export would move, roll them back, import nothing"
+        " (the schema preparation still commits)",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(

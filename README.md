@@ -236,8 +236,11 @@ normal workflow. The app parses the three 1 Hz datasets and merges windows:
 * two records that overlap → the longer wins; two halves cut at a window edge →
   stitched with distance/energy summed; nothing is double counted;
 * records already covered by richer sources (live logger/EVConduit) are skipped;
-* export SoC/odometer/range is joined onto existing GPS positions;
-* files are remembered by content hash, so re-uploading is a no-op.
+* export SoC/odometer/range and the pack power of drive positions are joined
+  onto existing GPS positions, and each drive gets the energy it used and
+  recovered;
+* files are remembered by content hash, so re-uploading inserts nothing twice;
+  the zip is still read and enriched again.
 
 Deliberately **not** imported: positions. The export has no coordinates, and the
 importer will not invent them. A zero-row result is normal when the windows are

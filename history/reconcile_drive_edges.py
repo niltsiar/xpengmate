@@ -10,12 +10,18 @@ moments. A guessed edge takes the time of the one export trip that matches it:
 * extended_start (extended_end): the trip's start (end) km within
   ``PRECISE_LOWER_KM`` of the drive's, and the trip overlaps the drive in time.
 
-The new edge still covers the drive's live positions. An edge keeps its guess
+An edge moves only while the drive still has its guessed time there. An inserted
+drive with one such edge left follows the rule of that edge.
+
+The new edge still covers the drive's live positions. A guess keeps its times
 when no trip or several trips match, when one trip matches several drives, or
-when the new times would overlap another drive or a charging process. Only the
-dates, duration and edge ranges of the drive and the position the repair added
-at that edge change; the km stay. The repair row records the confirmed times,
-so a second run changes nothing, and the repair job's watermark does not move.
+when the new times would overlap another drive or a charging process. The
+drive's dates, duration and edge ranges change, and so does the estimated
+position the repair added at that edge, which takes the export's battery
+level, odometer and range at the new moment. The positions of the car that
+have no drive and lie inside the new window are linked to the drive. The km
+stay. The repair row records the confirmed times, so a second run changes
+nothing, and the repair job's watermark does not move.
 
 The queries use only plain columns, so they run on PostgreSQL and on SQLite.
 """

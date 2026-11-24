@@ -6,9 +6,9 @@ for every second of a 30-day window, but no coordinates at all. Joining the two
 by timestamp gives TeslaMate positions that carry both - which is what the
 Battery Health, Charge Level and efficiency dashboards read.
 
-The join is exact-second, with a 5 s tolerance for clock skew, and nothing is
-interpolated across a gap: a position with no export sample within tolerance is
-left with its battery fields NULL, exactly as it was imported.
+A position takes the export sample nearest to it, within 5 s for clock skew, and
+nothing is interpolated across a gap: a position with no export sample within
+tolerance is left with its battery fields NULL, exactly as it was imported.
 
 The same samples carry pack voltage and current. A drive position takes their
 product as its power, and each drive the export covers gets the energy the pack
@@ -351,7 +351,11 @@ def resolve_zip(path: str) -> str:
 
 
 def enrich(store: Any, zip_path: str) -> int:
-    """Join the export onto this car's positions, then fill missing drive ranges."""
+    """Join the export onto this car's positions, then fill missing drive ranges.
+
+    A position gets battery level, odometer and range (as ideal and rated); a drive
+    position also gets the pack power.
+    """
     zip_path = resolve_zip(zip_path)
     with store.conn.cursor() as cur:
         cur.execute(
